@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         View::EnvelopeList => render_envelope_list(frame, app),
         View::MessageRead {
             content, scroll, ..
-        } => render_message(frame, content, *scroll, app.status.as_ref()),
+        } => render_message(frame, content, *scroll, app),
     }
 }
 
@@ -215,7 +215,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     );
 }
 
-fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<&Status>) {
+fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
     // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
@@ -247,14 +247,28 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<
         })
         .collect();
 
+    let title = if let Some(env) = app.envelopes.get(app.selected) {
+        if env.flags.is_empty() {
+            " Message ".to_string()
+        } else {
+            format!(" Message [{}] ", env.flags)
+        }
+    } else {
+        " Message ".to_string()
+    };
+
     let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Message "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
 
     frame.render_widget(paragraph, chunks[0]);
 
-    let status_line = if let Some(s) = status {
+    let chunks_bottom =
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(chunks[1]);
+
+    let status_line = if let Some(s) = &app.status {
         let (msg, color) = match s {
             Status::Working(msg) => (msg.as_str(), Color::Yellow),
             Status::Error(msg) => (msg.as_str(), Color::Red),
@@ -281,7 +295,25 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<
             Span::raw(": flag"),
         ])
     };
-    frame.render_widget(Paragraph::new(status_line), chunks[1]);
+    frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
+
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let flag_key = Line::from(vec![
+        Span::raw("S"),
+        Span::styled("een ", dim),
+        Span::raw("F"),
+        Span::styled("lagged ", dim),
+        Span::raw("A"),
+        Span::styled("nswered ", dim),
+        Span::raw("D"),
+        Span::styled("eleted ", dim),
+        Span::styled("Draf", dim),
+        Span::raw("T "),
+    ]);
+    frame.render_widget(
+        Paragraph::new(flag_key).alignment(ratatui::layout::Alignment::Right),
+        chunks_bottom[1],
+    );
 }
 
 /// Check if a line looks like an email header (e.g. "From: ...", "Subject: ...").

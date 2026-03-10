@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{App, Status, View};
+use crate::tui::app::{App, EnvelopeData, Status, View};
 
 const FROM_COLOR: Color = Color::Cyan;
 const FLAGGED_COLOR: Color = Color::Yellow;
@@ -20,6 +20,45 @@ pub fn render(frame: &mut Frame, app: &App) {
             content, scroll, ..
         } => render_message(frame, content, *scroll, app),
     }
+}
+
+/// Returns dynamic labels for the read/unread and flag toggle hints based on
+/// the currently selected envelope's state.
+fn toggle_labels(env: Option<&EnvelopeData>) -> (&'static str, &'static str) {
+    if let Some(env) = env {
+        (
+            if env.unseen {
+                ": mark read | "
+            } else {
+                ": mark unread | "
+            },
+            if env.flagged { ": unflag" } else { ": flag" },
+        )
+    } else {
+        (": mark read/unread | ", ": flag")
+    }
+}
+
+/// Renders the flag legend (Seen Flagged Answered Deleted drafT) into the
+/// given area, right-aligned.
+fn render_flag_legend(frame: &mut Frame, area: ratatui::layout::Rect) {
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let flag_key = Line::from(vec![
+        Span::raw("S"),
+        Span::styled("een ", dim),
+        Span::raw("F"),
+        Span::styled("lagged ", dim),
+        Span::raw("A"),
+        Span::styled("nswered ", dim),
+        Span::raw("D"),
+        Span::styled("eleted ", dim),
+        Span::styled("Draf", dim),
+        Span::raw("T "),
+    ]);
+    frame.render_widget(
+        Paragraph::new(flag_key).alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 fn render_envelope_list(frame: &mut Frame, app: &App) {
@@ -177,42 +216,27 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ))
     } else {
+        let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
         Line::from(vec![
             Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
             Span::raw(": quit | "),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(": read | "),
             Span::styled("j/k", Style::default().fg(Color::Yellow)),
             Span::raw(": navigate | "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": read | "),
+            Span::styled("r", Style::default().fg(Color::Yellow)),
+            Span::raw(read_label),
+            Span::styled("f", Style::default().fg(Color::Yellow)),
+            Span::raw(flag_label),
+            Span::raw(" | "),
             Span::styled("d", Style::default().fg(Color::Yellow)),
             Span::raw(": delete | "),
             Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(": archive | "),
-            Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(": mark read/unread | "),
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::raw(": flag"),
+            Span::raw(": archive"),
         ])
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
-
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let flag_key = Line::from(vec![
-        Span::raw("S"),
-        Span::styled("een ", dim),
-        Span::raw("F"),
-        Span::styled("lagged ", dim),
-        Span::raw("A"),
-        Span::styled("nswered ", dim),
-        Span::raw("D"),
-        Span::styled("eleted ", dim),
-        Span::styled("Draf", dim),
-        Span::raw("T "),
-    ]);
-    frame.render_widget(
-        Paragraph::new(flag_key).alignment(ratatui::layout::Alignment::Right),
-        chunks_bottom[1],
-    );
+    render_flag_legend(frame, chunks_bottom[1]);
 }
 
 fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
@@ -278,6 +302,7 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ))
     } else {
+        let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
         Line::from(vec![
             Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
             Span::raw(": back | "),
@@ -285,35 +310,19 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
             Span::raw(": scroll | "),
             Span::styled("n", Style::default().fg(Color::Yellow)),
             Span::raw(": next | "),
+            Span::styled("r", Style::default().fg(Color::Yellow)),
+            Span::raw(read_label),
+            Span::styled("f", Style::default().fg(Color::Yellow)),
+            Span::raw(flag_label),
+            Span::raw(" | "),
             Span::styled("d", Style::default().fg(Color::Yellow)),
             Span::raw(": delete | "),
             Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(": archive | "),
-            Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(": mark read/unread | "),
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::raw(": flag"),
+            Span::raw(": archive"),
         ])
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
-
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    let flag_key = Line::from(vec![
-        Span::raw("S"),
-        Span::styled("een ", dim),
-        Span::raw("F"),
-        Span::styled("lagged ", dim),
-        Span::raw("A"),
-        Span::styled("nswered ", dim),
-        Span::raw("D"),
-        Span::styled("eleted ", dim),
-        Span::styled("Draf", dim),
-        Span::raw("T "),
-    ]);
-    frame.render_widget(
-        Paragraph::new(flag_key).alignment(ratatui::layout::Alignment::Right),
-        chunks_bottom[1],
-    );
+    render_flag_legend(frame, chunks_bottom[1]);
 }
 
 /// Check if a line looks like an email header (e.g. "From: ...", "Subject: ...").

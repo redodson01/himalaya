@@ -250,52 +250,37 @@ async fn run_event_loop(
                 if let Some(env) = app.envelopes.get(app.selected) {
                     let id_str = env.id.clone();
                     let was_unseen = env.unseen;
-                    let account_key = if env.account.is_empty() {
-                        default_account
-                    } else {
-                        &env.account
-                    };
+                    let account_key = account_key_for(app, default_account);
 
                     app.status = Some(Status::Working("Loading…".to_string()));
                     terminal.draw(|frame| ui::render(frame, app))?;
 
+                    // Fetch and render message content (no add_flags yet)
                     let content = if let Some((backend, account_config, source_folder, _)) =
-                        backends.get(account_key)
+                        backends.get(&account_key)
                     {
                         match id_str.parse::<usize>() {
-                            Ok(id) => {
-                                match backend.get_messages(source_folder, &[id]).await {
-                                    Ok(emails) => {
-                                        // Mark as seen on the server if previously unseen
-                                        if was_unseen {
-                                            let seen = Flags::from_iter([Flag::Seen]);
-                                            let _ = backend
-                                                .add_flags(source_folder, &[id], &seen)
-                                                .await;
+                            Ok(id) => match backend.get_messages(source_folder, &[id]).await {
+                                Ok(emails) => {
+                                    let mut body = String::new();
+                                    for email in emails.to_vec() {
+                                        match email.to_read_tpl(account_config, |tpl| tpl).await {
+                                            Ok(tpl) => body.push_str(&tpl),
+                                            Err(e) => body
+                                                .push_str(&format!("Error reading message: {e}")),
                                         }
-
-                                        let mut body = String::new();
-                                        for email in emails.to_vec() {
-                                            match email.to_read_tpl(account_config, |tpl| tpl).await
-                                            {
-                                                Ok(tpl) => body.push_str(&tpl),
-                                                Err(e) => body.push_str(&format!(
-                                                    "Error reading message: {e}"
-                                                )),
-                                            }
-                                        }
-                                        body
                                     }
-                                    Err(e) => format!("Error fetching message: {e}"),
+                                    body
                                 }
-                            }
+                                Err(e) => format!("Error fetching message: {e}"),
+                            },
                             Err(_) => format!("Invalid envelope ID: {id_str}"),
                         }
                     } else {
                         format!("No backend for account: {account_key}")
                     };
 
-                    // Update local state to reflect the message is now seen
+                    // Update local envelope state immediately
                     if was_unseen {
                         if let Some(env) = app.envelopes.get_mut(app.selected) {
                             env.unseen = false;
@@ -305,8 +290,20 @@ async fn run_event_loop(
                         }
                     }
 
+                    // Show message to user before marking as read on server
                     app.status = None;
                     app.view = View::MessageRead { content, scroll: 0 };
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    // Mark as read on server (user is already reading)
+                    if was_unseen {
+                        if let Some((backend, _, source_folder, _)) = backends.get(&account_key) {
+                            if let Ok(id) = id_str.parse::<usize>() {
+                                let seen = Flags::from_iter([Flag::Seen]);
+                                let _ = backend.add_flags(source_folder, &[id], &seen).await;
+                            }
+                        }
+                    }
                 }
             }
             Action::BackToList => {

@@ -40,51 +40,53 @@ non-interactive context.
 
 ---
 
-## Future Optimizations
-
 ### 2. Background mark-as-read
 
-**Status:** Proposed
+**Status:** Done
 **Impact:** Medium | **Effort:** Low | **Complexity:** Low
 
-### Problem
+#### Problem
 
 When opening a message in the TUI (`src/tui/mod.rs`, `ReadMessage` handler),
 the `add_flags(Seen)` call runs sequentially after fetching the message body.
 The user waits for both operations before seeing the message content. The
 result of `add_flags` is already discarded (`let _ = ...`).
 
-### Solution
+#### Solution
 
-Display the message immediately after fetch, then fire off the `add_flags`
-call in the background via `tokio::spawn`. The flag update happens
-asynchronously while the user is already reading.
+Reorder the handler so the message is displayed *before* the `add_flags` call.
+After fetching and rendering the content, the local envelope state is updated
+immediately and the UI is drawn. The `add_flags` IMAP roundtrip (~100-500ms)
+then runs while the user is already reading. No `tokio::spawn` needed — just
+a reorder of operations.
 
-### Files
+#### Files
 
 - `src/tui/mod.rs` — `ReadMessage` handler
 
 ---
 
-## 3. Prefetch adjacent messages in TUI
+## Future Optimizations
+
+### 3. Prefetch adjacent messages in TUI
 
 **Status:** Proposed
 **Impact:** Medium | **Effort:** Medium | **Complexity:** Medium
 
-### Problem
+#### Problem
 
 Every press of Enter triggers a full network round-trip to fetch the message
 body. Users who read messages sequentially experience a loading delay on each
 one.
 
-### Solution
+#### Solution
 
 After displaying a message, spawn a background task to fetch the next (and
 optionally previous) message body. Cache results in a `HashMap<String, String>`
 on the App struct. On `ReadMessage`, check the cache before hitting the
 backend. Invalidate cache entries when messages are deleted/archived.
 
-### Files
+#### Files
 
 - `src/tui/mod.rs` — `ReadMessage` handler, event loop
 - `src/tui/app.rs` — add cache field to `App`

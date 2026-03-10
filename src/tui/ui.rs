@@ -178,7 +178,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         ))
     } else {
         Line::from(vec![
-            Span::styled(" q", Style::default().fg(Color::Yellow)),
+            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
             Span::raw(": quit | "),
             Span::styled("Enter", Style::default().fg(Color::Yellow)),
             Span::raw(": read | "),
@@ -261,7 +261,7 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<
         ))
     } else {
         Line::from(vec![
-            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
             Span::raw(": back | "),
             Span::styled("j/k", Style::default().fg(Color::Yellow)),
             Span::raw(": scroll | "),

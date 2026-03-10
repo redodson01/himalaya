@@ -30,7 +30,7 @@ pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
 
     let action = match view {
         View::EnvelopeList => match key.code {
-            KeyCode::Char('q') => Action::Quit,
+            KeyCode::Esc | KeyCode::Char('q') => Action::Quit,
             KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
             KeyCode::Enter => Action::ReadMessage,
@@ -39,7 +39,7 @@ pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
             _ => Action::None,
         },
         View::MessageRead { .. } => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Action::BackToList,
+            KeyCode::Esc | KeyCode::Char('b') => Action::BackToList,
             KeyCode::Down | KeyCode::Char('j') => Action::ScrollDown,
             KeyCode::Up | KeyCode::Char('k') => Action::ScrollUp,
             KeyCode::Char('d') => Action::DeleteMessage,

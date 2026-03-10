@@ -22,3 +22,24 @@ fn dir_parser(path: &str) -> Result<PathBuf, String> {
         .map(canonicalize::path)
         .map_err(|err| err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dir_parser_current_dir() {
+        let result = dir_parser(".");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn dir_parser_tilde() {
+        let result = dir_parser("~");
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.is_absolute());
+        assert!(!path.to_string_lossy().contains('~'));
+    }
+}

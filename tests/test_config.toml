@@ -1,0 +1,25 @@
+[accounts.test]
+default = true
+email = "user@localhost"
+
+# GreenMail only auto-creates INBOX, so alias Sent/Drafts there
+folder.aliases.sent = "INBOX"
+folder.aliases.drafts = "INBOX"
+# Delete by flagging since GreenMail has no Trash folder
+message.delete.style = "flag"
+
+backend.type = "imap"
+backend.host = "localhost"
+backend.port = 3143
+backend.encryption.type = "none"
+backend.login = "user@localhost"
+backend.auth.type = "password"
+backend.auth.raw = "password"
+
+message.send.backend.type = "smtp"
+message.send.backend.host = "localhost"
+message.send.backend.port = 3025
+message.send.backend.encryption.type = "none"
+message.send.backend.login = "user@localhost"
+message.send.backend.auth.type = "password"
+message.send.backend.auth.raw = "password"

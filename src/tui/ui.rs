@@ -173,7 +173,11 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
         Span::raw(": read | "),
         Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": navigate"),
+        Span::raw(": navigate | "),
+        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::raw(": delete | "),
+        Span::styled("a", Style::default().fg(Color::Yellow)),
+        Span::raw(": archive"),
     ]);
     frame.render_widget(Paragraph::new(keybindings), chunks_bottom[0]);
 
@@ -239,7 +243,11 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
         Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
         Span::raw(": back | "),
         Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": scroll"),
+        Span::raw(": scroll | "),
+        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::raw(": delete | "),
+        Span::styled("a", Style::default().fg(Color::Yellow)),
+        Span::raw(": archive"),
     ]);
     frame.render_widget(Paragraph::new(status), chunks[1]);
 }

@@ -17,7 +17,7 @@ use pimalaya_tui::{himalaya::backend::BackendBuilder, terminal::config::TomlConf
 
 use crate::config::TomlConfig;
 
-use self::app::{sort_flags, AccountSection, App, EnvelopeData, View};
+use self::app::{sort_flags, AccountSection, App, EnvelopeData, Status, View};
 use self::event::{handle_event, Action};
 
 /// Drop guard that restores the terminal on exit (including panics).
@@ -199,17 +199,17 @@ type BackendMap = HashMap<
 >;
 
 /// Resolve the account key for the currently selected envelope.
-fn account_key_for<'a>(app: &'a App, default_account: &'a str) -> &'a str {
+fn account_key_for(app: &App, default_account: &str) -> String {
     app.envelopes
         .get(app.selected)
         .map(|env| {
             if env.account.is_empty() {
-                default_account
+                default_account.to_string()
             } else {
-                env.account.as_str()
+                env.account.clone()
             }
         })
-        .unwrap_or(default_account)
+        .unwrap_or_else(|| default_account.to_string())
 }
 
 async fn run_event_loop(
@@ -222,6 +222,11 @@ async fn run_event_loop(
         terminal.draw(|frame| ui::render(frame, app))?;
 
         let action = handle_event(&app.view)?;
+
+        // Clear error status on any keypress
+        if !matches!(action, Action::None) && matches!(app.status, Some(Status::Error(_))) {
+            app.status = None;
+        }
 
         match action {
             Action::None => {}
@@ -239,6 +244,9 @@ async fn run_event_loop(
                     } else {
                         &env.account
                     };
+
+                    app.status = Some(Status::Working("Loading…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
 
                     let content = if let Some((backend, account_config, source_folder, _)) =
                         backends.get(account_key)
@@ -286,6 +294,7 @@ async fn run_event_loop(
                         }
                     }
 
+                    app.status = None;
                     app.view = View::MessageRead { content, scroll: 0 };
                 }
             }
@@ -307,16 +316,24 @@ async fn run_event_loop(
                     let id_str = env.id.clone();
                     let account_key = account_key_for(app, default_account);
 
-                    if let Some((backend, _, source_folder, _)) = backends.get(account_key) {
+                    app.status = Some(Status::Working("Deleting…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let mut error: Option<String> = None;
+                    if let Some((backend, _, source_folder, _)) = backends.get(&account_key) {
                         if let Ok(id) = id_str.parse::<usize>() {
-                            if backend.delete_messages(source_folder, &[id]).await.is_ok() {
-                                app.remove_envelope(app.selected);
-                                if !matches!(app.view, View::EnvelopeList) {
-                                    app.view = View::EnvelopeList;
+                            match backend.delete_messages(source_folder, &[id]).await {
+                                Ok(_) => {
+                                    app.remove_envelope(app.selected);
+                                    if !matches!(app.view, View::EnvelopeList) {
+                                        app.view = View::EnvelopeList;
+                                    }
                                 }
+                                Err(e) => error = Some(format!("Delete failed: {e}")),
                             }
                         }
                     }
+                    app.status = error.map(Status::Error);
                 }
             }
             Action::ArchiveMessage => {
@@ -324,22 +341,29 @@ async fn run_event_loop(
                     let id_str = env.id.clone();
                     let account_key = account_key_for(app, default_account);
 
+                    app.status = Some(Status::Working("Archiving…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let mut error: Option<String> = None;
                     if let Some((backend, _, source_folder, archive_folder)) =
-                        backends.get(account_key)
+                        backends.get(&account_key)
                     {
                         if let Ok(id) = id_str.parse::<usize>() {
-                            if backend
+                            match backend
                                 .move_messages(source_folder, archive_folder, &[id])
                                 .await
-                                .is_ok()
                             {
-                                app.remove_envelope(app.selected);
-                                if !matches!(app.view, View::EnvelopeList) {
-                                    app.view = View::EnvelopeList;
+                                Ok(_) => {
+                                    app.remove_envelope(app.selected);
+                                    if !matches!(app.view, View::EnvelopeList) {
+                                        app.view = View::EnvelopeList;
+                                    }
                                 }
+                                Err(e) => error = Some(format!("Archive failed: {e}")),
                             }
                         }
                     }
+                    app.status = error.map(Status::Error);
                 }
             }
         }

@@ -84,6 +84,11 @@ pub enum View {
     MessageRead { content: String, scroll: u16 },
 }
 
+pub enum Status {
+    Working(String),
+    Error(String),
+}
+
 pub struct App {
     pub envelopes: Vec<EnvelopeData>,
     pub sections: Vec<AccountSection>,
@@ -91,6 +96,7 @@ pub struct App {
     pub view: View,
     pub folder: String,
     pub should_quit: bool,
+    pub status: Option<Status>,
 }
 
 impl App {
@@ -102,6 +108,7 @@ impl App {
             view: View::EnvelopeList,
             folder,
             should_quit: false,
+            status: None,
         }
     }
 

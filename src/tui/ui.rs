@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{App, View};
+use crate::tui::app::{App, Status, View};
 
 const FROM_COLOR: Color = Color::Cyan;
 const FLAGGED_COLOR: Color = Color::Yellow;
@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         View::EnvelopeList => render_envelope_list(frame, app),
         View::MessageRead {
             content, scroll, ..
-        } => render_message(frame, content, *scroll),
+        } => render_message(frame, content, *scroll, app.status.as_ref()),
     }
 }
 
@@ -164,22 +164,33 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
     let chunks_bottom =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
             .split(chunks[1]);
 
-    let keybindings = Line::from(vec![
-        Span::styled(" q", Style::default().fg(Color::Yellow)),
-        Span::raw(": quit | "),
-        Span::styled("Enter", Style::default().fg(Color::Yellow)),
-        Span::raw(": read | "),
-        Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": navigate | "),
-        Span::styled("d", Style::default().fg(Color::Yellow)),
-        Span::raw(": delete | "),
-        Span::styled("a", Style::default().fg(Color::Yellow)),
-        Span::raw(": archive"),
-    ]);
-    frame.render_widget(Paragraph::new(keybindings), chunks_bottom[0]);
+    let status_line = if let Some(status) = &app.status {
+        let (msg, color) = match status {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" q", Style::default().fg(Color::Yellow)),
+            Span::raw(": quit | "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": read | "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": navigate | "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(": delete | "),
+            Span::styled("a", Style::default().fg(Color::Yellow)),
+            Span::raw(": archive"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
 
     let dim = Style::default().add_modifier(Modifier::DIM);
     let flag_key = Line::from(vec![
@@ -200,7 +211,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     );
 }
 
-fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
+fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<&Status>) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
     // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
@@ -239,17 +250,28 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
 
     frame.render_widget(paragraph, chunks[0]);
 
-    let status = Line::from(vec![
-        Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
-        Span::raw(": back | "),
-        Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": scroll | "),
-        Span::styled("d", Style::default().fg(Color::Yellow)),
-        Span::raw(": delete | "),
-        Span::styled("a", Style::default().fg(Color::Yellow)),
-        Span::raw(": archive"),
-    ]);
-    frame.render_widget(Paragraph::new(status), chunks[1]);
+    let status_line = if let Some(s) = status {
+        let (msg, color) = match s {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+            Span::raw(": back | "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": scroll | "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(": delete | "),
+            Span::styled("a", Style::default().fg(Color::Yellow)),
+            Span::raw(": archive"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(status_line), chunks[1]);
 }
 
 /// Check if a line looks like an email header (e.g. "From: ...", "Subject: ...").

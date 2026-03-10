@@ -17,7 +17,7 @@ use pimalaya_tui::{himalaya::backend::BackendBuilder, terminal::config::TomlConf
 
 use crate::config::TomlConfig;
 
-use self::app::{sort_flags, AccountSection, App, EnvelopeData, View};
+use self::app::{sort_flags, AccountSection, App, EnvelopeData, Status, View};
 use self::event::{handle_event, Action};
 
 /// Drop guard that restores the terminal on exit (including panics).
@@ -56,6 +56,8 @@ async fn run_single_account(config: TomlConfig) -> Result<()> {
                 .with_list_envelopes(BackendFeatureSource::Context)
                 .with_get_messages(BackendFeatureSource::Context)
                 .with_add_flags(BackendFeatureSource::Context)
+                .with_delete_messages(BackendFeatureSource::Context)
+                .with_move_messages(BackendFeatureSource::Context)
         },
     )
     .without_sending_backend()
@@ -63,6 +65,7 @@ async fn run_single_account(config: TomlConfig) -> Result<()> {
     .await?;
 
     let folder = account_config.get_inbox_folder_alias();
+    let archive_folder = account_config.get_folder_alias("archive");
 
     let page_size = account_config.get_envelope_list_page_size();
     let opts = ListEnvelopesOptions {
@@ -82,16 +85,12 @@ async fn run_single_account(config: TomlConfig) -> Result<()> {
     // Store backends keyed by account name for message reading
     let mut backends = HashMap::new();
     let default_account = String::new();
-    backends.insert(default_account.clone(), (backend, account_config));
+    backends.insert(
+        default_account.clone(),
+        (backend, account_config, folder.clone(), archive_folder),
+    );
 
-    run_event_loop(
-        &mut terminal,
-        &mut app,
-        &backends,
-        &folder,
-        &default_account,
-    )
-    .await
+    run_event_loop(&mut terminal, &mut app, &backends, &default_account).await
 }
 
 async fn run_all_accounts(config: TomlConfig) -> Result<()> {
@@ -119,12 +118,15 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                         .with_list_envelopes(BackendFeatureSource::Context)
                         .with_get_messages(BackendFeatureSource::Context)
                         .with_add_flags(BackendFeatureSource::Context)
+                        .with_delete_messages(BackendFeatureSource::Context)
+                        .with_move_messages(BackendFeatureSource::Context)
                 })
                 .without_sending_backend()
                 .build()
                 .await?;
 
             let acct_folder = account_config.get_inbox_folder_alias();
+            let archive_folder = account_config.get_folder_alias("archive");
             let page_size = account_config.get_envelope_list_page_size();
             let opts = ListEnvelopesOptions {
                 page: 0,
@@ -134,14 +136,20 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
 
             let envelopes = backend.list_envelopes(&acct_folder, opts).await?;
 
-            Ok::<_, color_eyre::eyre::Error>((backend, account_config, acct_folder, envelopes))
+            Ok::<_, color_eyre::eyre::Error>((
+                backend,
+                account_config,
+                acct_folder,
+                archive_folder,
+                envelopes,
+            ))
         }
         .await;
 
         match result {
-            Ok((backend, account_config, acct_folder, envelopes)) => {
+            Ok((backend, account_config, acct_folder, archive_folder, envelopes)) => {
                 if folder == "INBOX" && !acct_folder.is_empty() {
-                    folder = acct_folder;
+                    folder = acct_folder.clone();
                 }
 
                 let start = all_envelopes.len();
@@ -159,7 +167,10 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                     count,
                 });
 
-                backends.insert(name.clone(), (backend, account_config));
+                backends.insert(
+                    name.clone(),
+                    (backend, account_config, acct_folder.clone(), archive_folder),
+                );
             }
             Err(e) => {
                 eprintln!("Error loading account {}: {}", name, e);
@@ -174,14 +185,7 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
 
     // For multi-account, default_account is empty; we look up per-envelope
     let default_account = String::new();
-    run_event_loop(
-        &mut terminal,
-        &mut app,
-        &backends,
-        &folder,
-        &default_account,
-    )
-    .await
+    run_event_loop(&mut terminal, &mut app, &backends, &default_account).await
 }
 
 type BackendMap = HashMap<
@@ -189,20 +193,40 @@ type BackendMap = HashMap<
     (
         pimalaya_tui::himalaya::backend::Backend,
         Arc<email::account::config::AccountConfig>,
+        String, // source folder
+        String, // archive folder
     ),
 >;
+
+/// Resolve the account key for the currently selected envelope.
+fn account_key_for(app: &App, default_account: &str) -> String {
+    app.envelopes
+        .get(app.selected)
+        .map(|env| {
+            if env.account.is_empty() {
+                default_account.to_string()
+            } else {
+                env.account.clone()
+            }
+        })
+        .unwrap_or_else(|| default_account.to_string())
+}
 
 async fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     backends: &BackendMap,
-    folder: &str,
     default_account: &str,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
         let action = handle_event(&app.view)?;
+
+        // Clear error status on any keypress
+        if !matches!(action, Action::None) && matches!(app.status, Some(Status::Error(_))) {
+            app.status = None;
+        }
 
         match action {
             Action::None => {}
@@ -221,29 +245,39 @@ async fn run_event_loop(
                         &env.account
                     };
 
-                    let content = if let Some((backend, account_config)) = backends.get(account_key)
+                    app.status = Some(Status::Working("Loading…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let content = if let Some((backend, account_config, source_folder, _)) =
+                        backends.get(account_key)
                     {
                         match id_str.parse::<usize>() {
-                            Ok(id) => match backend.get_messages(folder, &[id]).await {
-                                Ok(emails) => {
-                                    // Mark as seen on the server if previously unseen
-                                    if was_unseen {
-                                        let seen = Flags::from_iter([Flag::Seen]);
-                                        let _ = backend.add_flags(folder, &[id], &seen).await;
-                                    }
-
-                                    let mut body = String::new();
-                                    for email in emails.to_vec() {
-                                        match email.to_read_tpl(account_config, |tpl| tpl).await {
-                                            Ok(tpl) => body.push_str(&tpl),
-                                            Err(e) => body
-                                                .push_str(&format!("Error reading message: {e}")),
+                            Ok(id) => {
+                                match backend.get_messages(source_folder, &[id]).await {
+                                    Ok(emails) => {
+                                        // Mark as seen on the server if previously unseen
+                                        if was_unseen {
+                                            let seen = Flags::from_iter([Flag::Seen]);
+                                            let _ = backend
+                                                .add_flags(source_folder, &[id], &seen)
+                                                .await;
                                         }
+
+                                        let mut body = String::new();
+                                        for email in emails.to_vec() {
+                                            match email.to_read_tpl(account_config, |tpl| tpl).await
+                                            {
+                                                Ok(tpl) => body.push_str(&tpl),
+                                                Err(e) => body.push_str(&format!(
+                                                    "Error reading message: {e}"
+                                                )),
+                                            }
+                                        }
+                                        body
                                     }
-                                    body
+                                    Err(e) => format!("Error fetching message: {e}"),
                                 }
-                                Err(e) => format!("Error fetching message: {e}"),
-                            },
+                            }
                             Err(_) => format!("Invalid envelope ID: {id_str}"),
                         }
                     } else {
@@ -260,6 +294,7 @@ async fn run_event_loop(
                         }
                     }
 
+                    app.status = None;
                     app.view = View::MessageRead { content, scroll: 0 };
                 }
             }
@@ -274,6 +309,61 @@ async fn run_event_loop(
             Action::ScrollUp => {
                 if let View::MessageRead { scroll, .. } = &mut app.view {
                     *scroll = scroll.saturating_sub(1);
+                }
+            }
+            Action::DeleteMessage => {
+                if let Some(env) = app.envelopes.get(app.selected) {
+                    let id_str = env.id.clone();
+                    let account_key = account_key_for(app, default_account);
+
+                    app.status = Some(Status::Working("Deleting…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let mut error: Option<String> = None;
+                    if let Some((backend, _, source_folder, _)) = backends.get(&account_key) {
+                        if let Ok(id) = id_str.parse::<usize>() {
+                            match backend.delete_messages(source_folder, &[id]).await {
+                                Ok(_) => {
+                                    app.remove_envelope(app.selected);
+                                    if !matches!(app.view, View::EnvelopeList) {
+                                        app.view = View::EnvelopeList;
+                                    }
+                                }
+                                Err(e) => error = Some(format!("Delete failed: {e}")),
+                            }
+                        }
+                    }
+                    app.status = error.map(Status::Error);
+                }
+            }
+            Action::ArchiveMessage => {
+                if let Some(env) = app.envelopes.get(app.selected) {
+                    let id_str = env.id.clone();
+                    let account_key = account_key_for(app, default_account);
+
+                    app.status = Some(Status::Working("Archiving…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let mut error: Option<String> = None;
+                    if let Some((backend, _, source_folder, archive_folder)) =
+                        backends.get(&account_key)
+                    {
+                        if let Ok(id) = id_str.parse::<usize>() {
+                            match backend
+                                .move_messages(source_folder, archive_folder, &[id])
+                                .await
+                            {
+                                Ok(_) => {
+                                    app.remove_envelope(app.selected);
+                                    if !matches!(app.view, View::EnvelopeList) {
+                                        app.view = View::EnvelopeList;
+                                    }
+                                }
+                                Err(e) => error = Some(format!("Archive failed: {e}")),
+                            }
+                        }
+                    }
+                    app.status = error.map(Status::Error);
                 }
             }
         }

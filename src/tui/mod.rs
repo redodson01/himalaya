@@ -248,7 +248,10 @@ async fn run_event_loop(
             }
             Action::SelectNext => app.select_next(),
             Action::SelectPrev => app.select_prev(),
-            Action::ReadMessage => {
+            Action::ReadMessage | Action::NextMessage => {
+                if matches!(action, Action::NextMessage) {
+                    app.select_next();
+                }
                 if let Some(env) = app.envelopes.get(app.selected) {
                     let id_str = env.id.clone();
                     let was_unseen = env.unseen;

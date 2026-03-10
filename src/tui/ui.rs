@@ -269,6 +269,8 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<
             Span::raw(": back | "),
             Span::styled("j/k", Style::default().fg(Color::Yellow)),
             Span::raw(": scroll | "),
+            Span::styled("n", Style::default().fg(Color::Yellow)),
+            Span::raw(": next | "),
             Span::styled("d", Style::default().fg(Color::Yellow)),
             Span::raw(": delete | "),
             Span::styled("a", Style::default().fg(Color::Yellow)),

@@ -14,6 +14,7 @@ const DATE_COLOR: Color = Color::DarkGray;
 const UNSEEN_COLOR: Color = Color::White;
 const FLAGGED_COLOR: Color = Color::Yellow;
 const HEADER_COLOR: Color = Color::Cyan;
+const SECTION_HEADER_COLOR: Color = Color::LightRed;
 
 pub fn render(frame: &mut Frame, app: &App) {
     match &app.view {
@@ -31,36 +32,61 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(1);
 
-    let rows: Vec<Row> = app
-        .envelopes
+    // Build a set of envelope indices that start a new account section
+    let section_starts: std::collections::HashMap<usize, &str> = app
+        .sections
         .iter()
-        .map(|e| {
-            let base_modifier = if e.unseen {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            };
-
-            let flag_style = if e.flagged {
-                Style::default()
-                    .fg(FLAGGED_COLOR)
-                    .add_modifier(base_modifier)
-            } else {
-                Style::default().fg(FLAG_COLOR).add_modifier(base_modifier)
-            };
-
-            let from_color = if e.unseen { UNSEEN_COLOR } else { FROM_COLOR };
-
-            Row::new([
-                Cell::from(e.flags.as_str()).style(flag_style),
-                Cell::from(e.from.as_str())
-                    .style(Style::default().fg(from_color).add_modifier(base_modifier)),
-                Cell::from(e.subject.as_str()).style(Style::default().add_modifier(base_modifier)),
-                Cell::from(e.date.as_str())
-                    .style(Style::default().fg(DATE_COLOR).add_modifier(base_modifier)),
-            ])
-        })
+        .filter(|s| s.count > 0)
+        .map(|s| (s.start, s.name.as_str()))
         .collect();
+
+    // Build rows, inserting visual section headers when the account changes.
+    // We track a mapping from table-row index to envelope index so that
+    // the selected highlight lands on the right table row.
+    let mut rows: Vec<Row> = Vec::new();
+    let mut envelope_to_table_row: Vec<usize> = Vec::new();
+
+    for (i, e) in app.envelopes.iter().enumerate() {
+        // Insert a section header row if this envelope starts a new section
+        if let Some(account_name) = section_starts.get(&i) {
+            let style = Style::default()
+                .fg(SECTION_HEADER_COLOR)
+                .add_modifier(Modifier::BOLD);
+            rows.push(Row::new([
+                Cell::from(""),
+                Cell::from(format!(" {} ", account_name)).style(style),
+                Cell::from(""),
+                Cell::from(""),
+            ]));
+        }
+
+        envelope_to_table_row.push(rows.len());
+
+        let base_modifier = if e.unseen {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
+
+        let flag_style = if e.flagged {
+            Style::default()
+                .fg(FLAGGED_COLOR)
+                .add_modifier(base_modifier)
+        } else {
+            Style::default().fg(FLAG_COLOR).add_modifier(base_modifier)
+        };
+
+        let from_color = if e.unseen { UNSEEN_COLOR } else { FROM_COLOR };
+
+        rows.push(Row::new([
+            Cell::from(e.flags.as_str()).style(flag_style),
+            Cell::from(e.from.as_str())
+                .style(Style::default().fg(from_color).add_modifier(base_modifier)),
+            Cell::from(e.subject.as_str()).style(Style::default().add_modifier(base_modifier)),
+            Cell::from(e.date.as_str())
+                .style(Style::default().fg(DATE_COLOR).add_modifier(base_modifier)),
+        ]));
+    }
 
     let table = Table::new(
         rows,
@@ -83,7 +109,12 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let mut state = TableState::default().with_selected(Some(app.selected));
+    // Map the envelope selection index to the correct table row
+    let table_selected = envelope_to_table_row
+        .get(app.selected)
+        .copied()
+        .unwrap_or(app.selected);
+    let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
     let status = Line::from(vec![
@@ -100,11 +131,16 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
 fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    // Color header lines (e.g. "From: ...", "Subject: ...") differently from body
+    // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
+    // Headers only appear before the first blank line.
+    let mut in_headers = true;
     let lines: Vec<Line> = content
         .lines()
         .map(|line| {
-            if is_header_line(line) {
+            if in_headers && line.is_empty() {
+                in_headers = false;
+            }
+            if in_headers && is_header_line(line) {
                 if let Some((key, value)) = line.split_once(": ") {
                     Line::from(vec![
                         Span::styled(
@@ -171,5 +207,9 @@ mod tests {
         assert!(!is_header_line(""));
         assert!(!is_header_line("no colon here"));
         assert!(!is_header_line(": empty key"));
+        // These match is_header_line syntax but should only be styled
+        // when they appear before the first blank line (enforced by
+        // render_message, not by is_header_line itself).
+        assert!(is_header_line("Note: something important"));
     }
 }

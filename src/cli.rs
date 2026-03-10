@@ -17,9 +17,11 @@ use crate::{
     account::command::AccountSubcommand,
     completion::command::CompletionGenerateCommand,
     config::TomlConfig,
-    envelope::command::EnvelopeSubcommand,
+    envelope::command::{
+        list::EnvelopeListCommand, thread::EnvelopeThreadCommand, EnvelopeSubcommand,
+    },
     flag::command::FlagSubcommand,
-    folder::command::FolderSubcommand,
+    folder::command::{list::FolderListCommand, FolderSubcommand},
     manual::command::ManualGenerateCommand,
     message::{
         attachment::command::AttachmentSubcommand, command::MessageSubcommand,
@@ -68,6 +70,14 @@ pub struct Cli {
     /// Launch interactive terminal UI.
     #[arg(long, global = true, env = "HIMALAYA_TUI")]
     pub tui: bool,
+
+    /// Run listing commands across all configured accounts.
+    ///
+    /// When set, read-only listing commands (envelope list, envelope thread,
+    /// folder list) execute once per account with a header separator.
+    /// Mutually exclusive with --account.
+    #[arg(long, global = true, env = "HIMALAYA_ALL")]
+    pub all: bool,
 
     /// Disable all logs.
     ///
@@ -138,7 +148,21 @@ pub enum HimalayaCommand {
 }
 
 impl HimalayaCommand {
-    pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+    pub async fn execute(
+        self,
+        printer: &mut impl Printer,
+        config_paths: &[PathBuf],
+        all: bool,
+    ) -> Result<()> {
+        if all {
+            match &self {
+                Self::Manual(_) | Self::Completion(_) => {
+                    // Ignore --all for these commands
+                }
+                _ => return self.execute_all(printer, config_paths).await,
+            }
+        }
+
         match self {
             Self::Account(cmd) => {
                 let config = TomlConfig::from_paths_or_default(config_paths).await?;
@@ -171,5 +195,70 @@ impl HimalayaCommand {
             Self::Manual(cmd) => cmd.execute(printer).await,
             Self::Completion(cmd) => cmd.execute().await,
         }
+    }
+
+    async fn execute_all(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+        // Extract the listing command variant, or error
+        enum ListingCommand {
+            EnvelopeList(EnvelopeListCommand),
+            EnvelopeThread(EnvelopeThreadCommand),
+            FolderList(FolderListCommand),
+        }
+
+        let listing = match self {
+            Self::Envelope(EnvelopeSubcommand::List(cmd)) => {
+                if cmd.account.name.is_some() {
+                    color_eyre::eyre::bail!("--all and --account are mutually exclusive");
+                }
+                ListingCommand::EnvelopeList(cmd)
+            }
+            Self::Envelope(EnvelopeSubcommand::Thread(cmd)) => {
+                if cmd.account.name.is_some() {
+                    color_eyre::eyre::bail!("--all and --account are mutually exclusive");
+                }
+                ListingCommand::EnvelopeThread(cmd)
+            }
+            Self::Folder(FolderSubcommand::List(cmd)) => {
+                if cmd.account.name.is_some() {
+                    color_eyre::eyre::bail!("--all and --account are mutually exclusive");
+                }
+                ListingCommand::FolderList(cmd)
+            }
+            _ => {
+                color_eyre::eyre::bail!(
+                    "--all can only be used with listing commands (envelope list, envelope thread, folder list)"
+                );
+            }
+        };
+
+        let config = TomlConfig::from_paths_or_default(config_paths).await?;
+        let mut account_names: Vec<&String> = config.accounts.keys().collect();
+        account_names.sort();
+
+        for name in &account_names {
+            println!("--- {} ---", name);
+            let result = match &listing {
+                ListingCommand::EnvelopeList(cmd) => {
+                    let mut cmd = cmd.clone();
+                    cmd.account.name = Some(name.to_string());
+                    cmd.execute(printer, &config).await
+                }
+                ListingCommand::EnvelopeThread(cmd) => {
+                    let mut cmd = cmd.clone();
+                    cmd.account.name = Some(name.to_string());
+                    cmd.execute(printer, &config).await
+                }
+                ListingCommand::FolderList(cmd) => {
+                    let mut cmd = cmd.clone();
+                    cmd.account.name = Some(name.to_string());
+                    cmd.execute(printer, &config).await
+                }
+            };
+            if let Err(e) = result {
+                eprintln!("Error for account {}: {}", name, e);
+            }
+        }
+
+        Ok(())
     }
 }

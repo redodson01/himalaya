@@ -49,11 +49,25 @@ async fn main() -> Result<()> {
             if cli.tui {
                 color_eyre::eyre::bail!("--tui cannot be used with subcommands");
             }
-            cmd.execute(&mut printer, cli.config_paths.as_ref()).await
+            cmd.execute(&mut printer, cli.config_paths.as_ref(), cli.all)
+                .await
         }
         None => {
             if cli.tui {
-                himalaya::tui::run(cli.config_paths.as_ref()).await
+                himalaya::tui::run(cli.config_paths.as_ref(), cli.all).await
+            } else if cli.all {
+                let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
+                let mut account_names: Vec<&String> = config.accounts.keys().collect();
+                account_names.sort();
+                for name in &account_names {
+                    println!("--- {} ---", name);
+                    let mut cmd = EnvelopeListCommand::default();
+                    cmd.account.name = Some(name.to_string());
+                    if let Err(e) = cmd.execute(&mut printer, &config).await {
+                        eprintln!("Error for account {}: {}", name, e);
+                    }
+                }
+                Ok(())
             } else {
                 let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
                 EnvelopeListCommand::default()

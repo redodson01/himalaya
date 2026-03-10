@@ -35,6 +35,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
   - [iCloud Mail](#icloud-mail)
 - [Interfaces](#interfaces)
 - [FAQ](#faq)
+- [Testing](#testing)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
@@ -687,6 +688,50 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 
   Simply set the environment variable NO_COLOR=1
 </details>
+
+## Testing
+
+Himalaya has three layers of tests:
+
+### Unit tests
+
+```
+cargo test --lib
+```
+
+### CLI smoke tests
+
+Verifies `--help`, `--version`, shell completions, man page generation, and error cases:
+
+```
+cargo test --test cli_smoke
+```
+
+### Integration tests
+
+Requires a running [GreenMail](https://greenmail-mail-test.github.io/greenmail/) server (lightweight IMAP/SMTP test server). Tests folder CRUD, send/receive, flags, and copy/move operations.
+
+Start GreenMail with Docker Compose:
+
+```
+docker compose -f docker-compose.test.yml up -d
+```
+
+Then run the integration tests:
+
+```
+HIMALAYA_INTEGRATION_TEST=1 cargo test --test integration
+```
+
+Stop GreenMail when done:
+
+```
+docker compose -f docker-compose.test.yml down
+```
+
+### CI
+
+All tests run automatically on every pull request via [GitHub Actions](.github/workflows/ci.yml). The CI pipeline also checks formatting (`cargo fmt`) and runs `cargo clippy` across 14 feature combinations.
 
 ## Social
 

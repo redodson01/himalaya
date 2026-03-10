@@ -53,6 +53,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
 - Global system **keyring** for secret management (requires `keyring` feature)
 - **OAuth 2.0** authorization flow (requires `oauth2` feature)
 - **Interactive TUI** mode via `--tui` (or `HIMALAYA_TUI=1`): browse envelopes and read messages in a full-screen terminal interface using [ratatui](https://ratatui.rs)
+- **All-accounts mode** via `--all` (or `HIMALAYA_ALL=1`): run listing commands (`envelope list`, `envelope thread`, `folder list`) across all configured accounts at once, with per-account headers. Also works with `--tui` to show stacked account sections
 - **JSON** output via `--output json`
 - **PGP** encryption:
   - via shell commands (requires `pgp-commands` feature)

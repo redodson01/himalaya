@@ -9,6 +9,14 @@ pub struct EnvelopeData {
     pub flags: String,
     pub unseen: bool,
     pub flagged: bool,
+    pub account: String,
+}
+
+/// Tracks a contiguous range of envelopes belonging to one account.
+pub struct AccountSection {
+    pub name: String,
+    pub start: usize,
+    pub count: usize,
 }
 
 impl From<&Envelope> for EnvelopeData {
@@ -46,6 +54,7 @@ impl From<&Envelope> for EnvelopeData {
             flags: flags.join(""),
             unseen,
             flagged,
+            account: String::new(),
         }
     }
 }
@@ -57,6 +66,7 @@ pub enum View {
 
 pub struct App {
     pub envelopes: Vec<EnvelopeData>,
+    pub sections: Vec<AccountSection>,
     pub selected: usize,
     pub view: View,
     pub folder: String,
@@ -67,11 +77,17 @@ impl App {
     pub fn new(envelopes: Vec<EnvelopeData>, folder: String) -> Self {
         Self {
             envelopes,
+            sections: Vec::new(),
             selected: 0,
             view: View::EnvelopeList,
             folder,
             should_quit: false,
         }
+    }
+
+    pub fn with_sections(mut self, sections: Vec<AccountSection>) -> Self {
+        self.sections = sections;
+        self
     }
 
     pub fn select_next(&mut self) {
@@ -98,6 +114,7 @@ mod tests {
             flags: String::new(),
             unseen: false,
             flagged: false,
+            account: String::new(),
         }
     }
 
@@ -209,5 +226,37 @@ mod tests {
         assert!(data.flags.is_empty());
         assert!(data.unseen); // no Seen flag
         assert!(!data.flagged); // no Flagged flag
+    }
+
+    #[test]
+    fn multi_section_navigation() {
+        let envelopes = vec![
+            make_envelope("1", "a"),
+            make_envelope("2", "b"),
+            make_envelope("3", "c"),
+        ];
+        let sections = vec![
+            AccountSection {
+                name: "work".to_string(),
+                start: 0,
+                count: 2,
+            },
+            AccountSection {
+                name: "personal".to_string(),
+                start: 2,
+                count: 1,
+            },
+        ];
+        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+
+        assert_eq!(app.selected, 0);
+        app.select_next();
+        assert_eq!(app.selected, 1);
+        app.select_next();
+        assert_eq!(app.selected, 2);
+
+        // Clamp at end
+        app.select_next();
+        assert_eq!(app.selected, 2);
     }
 }

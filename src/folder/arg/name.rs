@@ -2,7 +2,7 @@ use clap::Parser;
 use email::folder::INBOX;
 
 /// The optional folder name flag parser.
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 pub struct FolderNameOptionalFlag {
     /// The name of the folder.
     #[arg(long = "folder", short = 'f')]

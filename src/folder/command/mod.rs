@@ -1,7 +1,7 @@
 mod add;
 mod delete;
 mod expunge;
-mod list;
+pub mod list;
 mod purge;
 
 use clap::Subcommand;

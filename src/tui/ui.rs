@@ -8,10 +8,7 @@ use ratatui::{
 
 use crate::tui::app::{App, View};
 
-const FLAG_COLOR: Color = Color::DarkGray;
 const FROM_COLOR: Color = Color::Cyan;
-const DATE_COLOR: Color = Color::DarkGray;
-const UNSEEN_COLOR: Color = Color::White;
 const FLAGGED_COLOR: Color = Color::Yellow;
 const HEADER_COLOR: Color = Color::Cyan;
 const SECTION_HEADER_COLOR: Color = Color::LightRed;
@@ -28,17 +25,37 @@ pub fn render(frame: &mut Frame, app: &App) {
 fn render_envelope_list(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let header = Row::new(["FLAGS", "FROM", "SUBJECT", "DATE"])
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header_style = Style::default().add_modifier(Modifier::BOLD);
+    let header = Row::new([
+        Cell::from(" "),
+        Cell::from("FLAGS"),
+        Cell::from(" "),
+        Cell::from(" "),
+        Cell::from("FROM"),
+        Cell::from(" "),
+        Cell::from(" "),
+        Cell::from("SUBJECT"),
+        Cell::from(" "),
+        Cell::from(" "),
+        Cell::from("DATE"),
+    ])
+    .style(header_style)
+    .bottom_margin(1);
 
-    // Build a set of envelope indices that start a new account section
-    let section_starts: std::collections::HashMap<usize, &str> = app
-        .sections
-        .iter()
-        .filter(|s| s.count > 0)
-        .map(|s| (s.start, s.name.as_str()))
-        .collect();
+    // Build a set of envelope indices that start a new account section,
+    // tracking whether each is the first section (to skip the blank separator).
+    let section_starts: std::collections::HashMap<usize, (&str, bool)> = {
+        let mut first = true;
+        app.sections
+            .iter()
+            .filter(|s| s.count > 0)
+            .map(|s| {
+                let is_first = first;
+                first = false;
+                (s.start, (s.name.as_str(), is_first))
+            })
+            .collect()
+    };
 
     // Build rows, inserting visual section headers when the account changes.
     // We track a mapping from table-row index to envelope index so that
@@ -48,19 +65,26 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
 
     for (i, e) in app.envelopes.iter().enumerate() {
         // Insert a section header row if this envelope starts a new section
-        if let Some(account_name) = section_starts.get(&i) {
+        if let Some((account_name, is_first)) = section_starts.get(&i) {
+            if !is_first {
+                rows.push(Row::new(std::iter::repeat_with(|| Cell::from("")).take(11)));
+            }
             let style = Style::default()
                 .fg(SECTION_HEADER_COLOR)
                 .add_modifier(Modifier::BOLD);
-            rows.push(Row::new([
-                Cell::from(""),
-                Cell::from(format!(" {} ", account_name)).style(style),
-                Cell::from(""),
-                Cell::from(""),
-            ]));
+            let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from("")).take(11).collect();
+            cells[4] = Cell::from(account_name.to_string()).style(style);
+            rows.push(Row::new(cells));
         }
 
         envelope_to_table_row.push(rows.len());
+
+        let is_selected = app.selected == i;
+        let highlight = if is_selected {
+            Modifier::REVERSED
+        } else {
+            Modifier::empty()
+        };
 
         let base_modifier = if e.unseen {
             Modifier::BOLD
@@ -68,45 +92,67 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             Modifier::empty()
         };
 
+        let dim = if e.unseen {
+            Modifier::empty()
+        } else {
+            Modifier::DIM
+        };
+
         let flag_style = if e.flagged {
             Style::default()
                 .fg(FLAGGED_COLOR)
-                .add_modifier(base_modifier)
+                .add_modifier(base_modifier | highlight)
         } else {
-            Style::default().fg(FLAG_COLOR).add_modifier(base_modifier)
+            Style::default().add_modifier(dim | base_modifier | highlight)
         };
 
-        let from_color = if e.unseen { UNSEEN_COLOR } else { FROM_COLOR };
+        let from_style = if e.unseen {
+            Style::default().add_modifier(Modifier::BOLD | highlight)
+        } else {
+            Style::default().fg(FROM_COLOR).add_modifier(highlight)
+        };
+
+        let from_combined = from_style.add_modifier(base_modifier);
+        let subject_style = Style::default().add_modifier(base_modifier | highlight);
+        let date_style = Style::default().add_modifier(dim | base_modifier | highlight);
 
         rows.push(Row::new([
+            Cell::from(" ").style(flag_style),
             Cell::from(e.flags.as_str()).style(flag_style),
-            Cell::from(e.from.as_str())
-                .style(Style::default().fg(from_color).add_modifier(base_modifier)),
-            Cell::from(e.subject.as_str()).style(Style::default().add_modifier(base_modifier)),
-            Cell::from(e.date.as_str())
-                .style(Style::default().fg(DATE_COLOR).add_modifier(base_modifier)),
+            Cell::from(" ").style(flag_style),
+            Cell::from(" ").style(from_combined),
+            Cell::from(e.from.as_str()).style(from_combined),
+            Cell::from(" ").style(from_combined),
+            Cell::from(" ").style(subject_style),
+            Cell::from(e.subject.as_str()).style(subject_style),
+            Cell::from(" ").style(subject_style),
+            Cell::from(" ").style(date_style),
+            Cell::from(e.date.as_str()).style(date_style),
         ]));
     }
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(1),
             Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Percentage(25),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Percentage(50),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(16),
         ],
     )
+    .column_spacing(0)
     .header(header)
     .block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(" {} ", app.folder)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
     );
 
     // Map the envelope selection index to the correct table row

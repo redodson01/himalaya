@@ -14,6 +14,7 @@ pub enum Action {
     DeleteMessage,
     ArchiveMessage,
     ToggleRead,
+    ToggleFlag,
 }
 
 pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
@@ -38,6 +39,7 @@ pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
             KeyCode::Char('d') => Action::DeleteMessage,
             KeyCode::Char('a') => Action::ArchiveMessage,
             KeyCode::Char('r') => Action::ToggleRead,
+            KeyCode::Char('f') => Action::ToggleFlag,
             _ => Action::None,
         },
         View::MessageRead { .. } => match key.code {
@@ -47,6 +49,7 @@ pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
             KeyCode::Char('d') => Action::DeleteMessage,
             KeyCode::Char('a') => Action::ArchiveMessage,
             KeyCode::Char('r') => Action::ToggleRead,
+            KeyCode::Char('f') => Action::ToggleFlag,
             _ => Action::None,
         },
     };

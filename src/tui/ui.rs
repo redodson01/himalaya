@@ -189,7 +189,9 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             Span::styled("a", Style::default().fg(Color::Yellow)),
             Span::raw(": archive | "),
             Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(": mark read/unread"),
+            Span::raw(": mark read/unread | "),
+            Span::styled("f", Style::default().fg(Color::Yellow)),
+            Span::raw(": flag"),
         ])
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
@@ -272,7 +274,9 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<
             Span::styled("a", Style::default().fg(Color::Yellow)),
             Span::raw(": archive | "),
             Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(": mark read/unread"),
+            Span::raw(": mark read/unread | "),
+            Span::styled("f", Style::default().fg(Color::Yellow)),
+            Span::raw(": flag"),
         ])
     };
     frame.render_widget(Paragraph::new(status_line), chunks[1]);

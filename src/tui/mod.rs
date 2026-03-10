@@ -393,6 +393,50 @@ async fn run_event_loop(
                     app.status = error.map(Status::Error);
                 }
             }
+            Action::ToggleFlag => {
+                if let Some(env) = app.envelopes.get(app.selected) {
+                    let id_str = env.id.clone();
+                    let is_flagged = env.flagged;
+                    let account_key = account_key_for(app, default_account);
+
+                    let label = if is_flagged {
+                        "Unflagging…"
+                    } else {
+                        "Flagging…"
+                    };
+                    app.status = Some(Status::Working(label.to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let mut error: Option<String> = None;
+                    if let Some((backend, _, source_folder, _)) = backends.get(&account_key) {
+                        if let Ok(id) = id_str.parse::<usize>() {
+                            let flagged = Flags::from_iter([Flag::Flagged]);
+                            let result = if is_flagged {
+                                backend.remove_flags(source_folder, &[id], &flagged).await
+                            } else {
+                                backend.add_flags(source_folder, &[id], &flagged).await
+                            };
+                            match result {
+                                Ok(_) => {
+                                    if let Some(env) = app.envelopes.get_mut(app.selected) {
+                                        env.flagged = !is_flagged;
+                                        if is_flagged {
+                                            env.flags = env.flags.replace('F', "");
+                                        } else if !env.flags.contains('F') {
+                                            env.flags = sort_flags(&format!("F{}", env.flags));
+                                        }
+                                    }
+                                    if !matches!(app.view, View::EnvelopeList) {
+                                        app.view = View::EnvelopeList;
+                                    }
+                                }
+                                Err(e) => error = Some(format!("Flag toggle failed: {e}")),
+                            }
+                        }
+                    }
+                    app.status = error.map(Status::Error);
+                }
+            }
             Action::ArchiveMessage => {
                 if let Some(env) = app.envelopes.get(app.selected) {
                     let id_str = env.id.clone();

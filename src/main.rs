@@ -45,12 +45,21 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut printer = StdoutPrinter::new(cli.output);
     let res = match cli.command {
-        Some(cmd) => cmd.execute(&mut printer, cli.config_paths.as_ref()).await,
+        Some(cmd) => {
+            if cli.tui {
+                color_eyre::eyre::bail!("--tui cannot be used with subcommands");
+            }
+            cmd.execute(&mut printer, cli.config_paths.as_ref()).await
+        }
         None => {
-            let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
-            EnvelopeListCommand::default()
-                .execute(&mut printer, &config)
-                .await
+            if cli.tui {
+                himalaya::tui::run(cli.config_paths.as_ref()).await
+            } else {
+                let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
+                EnvelopeListCommand::default()
+                    .execute(&mut printer, &config)
+                    .await
+            }
         }
     };
 

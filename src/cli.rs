@@ -65,6 +65,10 @@ pub struct Cli {
     #[arg(value_name = "FORMAT", value_enum, default_value_t = Default::default())]
     pub output: OutputFmt,
 
+    /// Launch interactive terminal UI.
+    #[arg(long, global = true, env = "HIMALAYA_TUI")]
+    pub tui: bool,
+
     /// Disable all logs.
     ///
     /// Same as running command with `RUST_LOG=off` environment

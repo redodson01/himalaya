@@ -52,6 +52,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
 - **Sendmail** backend (requires `sendmail` feature)
 - Global system **keyring** for secret management (requires `keyring` feature)
 - **OAuth 2.0** authorization flow (requires `oauth2` feature)
+- **Interactive TUI** mode via `--tui` (or `HIMALAYA_TUI=1`): browse envelopes and read messages in a full-screen terminal interface using [ratatui](https://ratatui.rs)
 - **JSON** output via `--output json`
 - **PGP** encryption:
   - via shell commands (requires `pgp-commands` feature)
@@ -528,7 +529,7 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 
   Aerc, mutt and alpine can be categorized as Terminal User Interfaces (TUI). When the program is executed, your terminal is locked into an event loop and you interact with your emails using keybinds.
 
-  Himalaya is also a TUI, but more specifically a Command-Line Interface (CLI). There is no event loop: you interact with your emails using shell commands, in a stateless way.
+  Himalaya started as a pure CLI (no event loop, stateless shell commands). It now also offers an optional interactive TUI mode (`--tui`) for browsing envelopes and reading messages in a full-screen interface, while retaining all the CLI capabilities.
 
   Additionaly, Himalaya CLI is based on `email-lib`, which is also part of the Pimalaya project. The aim is not just to propose a new terminal interface, but also to expose Rust tools to deal with emails. Anyone who knows Rust language can build his own email interface, without re-inventing the wheel.
 </details>

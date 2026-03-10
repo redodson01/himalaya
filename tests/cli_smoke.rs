@@ -83,6 +83,26 @@ fn invalid_config_path() {
 }
 
 #[test]
+fn tui_flag_in_help() {
+    himalaya()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--tui"));
+}
+
+#[test]
+fn tui_with_subcommand_fails() {
+    himalaya()
+        .args(["--tui", "folder", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--tui cannot be used with subcommands",
+        ));
+}
+
+#[test]
 fn folder_help() {
     himalaya()
         .args(["folder", "--help"])

@@ -11,6 +11,17 @@ use pimalaya_tui::terminal::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Set a default log filter that silences expected warnings from
+    // imap-codec quirk features (e.g. servers omitting required text
+    // fields). Only applies when the user hasn't set RUST_LOG or
+    // passed --quiet/--debug/--trace, which override this via
+    // pimalaya-tui's tracing::install().
+    if std::env::var("RUST_LOG").is_err()
+        && !std::env::args().any(|a| a == "--quiet" || a == "--debug" || a == "--trace")
+    {
+        std::env::set_var("RUST_LOG", "warn,imap_codec=error");
+    }
+
     let tracing = tracing::install()?;
 
     #[cfg(feature = "keyring")]

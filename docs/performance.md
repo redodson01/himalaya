@@ -10,32 +10,39 @@ Tracking document for performance improvements to Himalaya.
 
 ---
 
-## 1. Parallelize multi-account loading
+## Implemented
 
-**Status:** Proposed
+### 1. Parallelize multi-account loading
+
+**Status:** Done
 **Impact:** High | **Effort:** Low | **Complexity:** Low
 
-### Problem
+#### Problem
 
 `run_all_accounts()` in `src/tui/mod.rs` loads each account backend
 sequentially in a `for` loop. With N IMAP accounts, TUI startup time equals
-the sum of all connection times. The same pattern exists in the CLI's
-`execute_all()` (`src/cli.rs`) and the default `--all` path in `main.rs`.
+the sum of all connection times.
 
-### Solution
+#### Solution
 
-Use `futures::future::join_all()` or similar to build all backends
-concurrently. Startup time becomes `max(times)` instead of `sum(times)`.
+Use `tokio::spawn` to build all backends and list envelopes concurrently.
+Handles are awaited in creation order to preserve sorted account ordering.
+Startup time becomes `max(times)` instead of `sum(times)`.
 
-### Files
+Only the TUI path is parallelized. The CLI paths (`src/cli.rs` `execute_all()`
+and `src/main.rs` default `--all`) are deferred because the `&mut impl Printer`
+isn't `Send` and output ordering adds complexity for minimal gain in a
+non-interactive context.
+
+#### Files
 
 - `src/tui/mod.rs` — `run_all_accounts()`
-- `src/cli.rs` — `execute_all()`
-- `src/main.rs` — default `--all` envelope list path
 
 ---
 
-## 2. Background mark-as-read
+## Future Optimizations
+
+### 2. Background mark-as-read
 
 **Status:** Proposed
 **Impact:** Medium | **Effort:** Low | **Complexity:** Low

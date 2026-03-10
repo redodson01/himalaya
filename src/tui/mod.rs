@@ -102,52 +102,63 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
     let mut backends = HashMap::new();
     let mut folder = String::from("INBOX");
 
+    // Spawn all account loads concurrently for parallel I/O
+    let mut handles = Vec::new();
     for name in &account_names {
-        let result = async {
-            let (toml_account_config, account_config) = config
-                .clone()
-                .into_account_configs(Some(name.as_str()), |c: &Config, n| c.account(n).ok())?;
+        let config = config.clone();
+        let name = name.clone();
+        handles.push(tokio::spawn(async move {
+            let result: Result<_, color_eyre::eyre::Error> = async {
+                let (toml_account_config, account_config) = config
+                    .into_account_configs(Some(name.as_str()), |c: &Config, n| c.account(n).ok())?;
 
-            let toml_account_config = Arc::new(toml_account_config);
-            let account_config = Arc::new(account_config);
+                let toml_account_config = Arc::new(toml_account_config);
+                let account_config = Arc::new(account_config);
 
-            let backend =
-                BackendBuilder::new(toml_account_config, account_config.clone(), |builder| {
-                    builder
-                        .without_features()
-                        .with_list_envelopes(BackendFeatureSource::Context)
-                        .with_get_messages(BackendFeatureSource::Context)
-                        .with_add_flags(BackendFeatureSource::Context)
-                        .with_delete_messages(BackendFeatureSource::Context)
-                        .with_move_messages(BackendFeatureSource::Context)
-                })
-                .without_sending_backend()
-                .build()
-                .await?;
+                let backend =
+                    BackendBuilder::new(toml_account_config, account_config.clone(), |builder| {
+                        builder
+                            .without_features()
+                            .with_list_envelopes(BackendFeatureSource::Context)
+                            .with_get_messages(BackendFeatureSource::Context)
+                            .with_add_flags(BackendFeatureSource::Context)
+                            .with_delete_messages(BackendFeatureSource::Context)
+                            .with_move_messages(BackendFeatureSource::Context)
+                    })
+                    .without_sending_backend()
+                    .build()
+                    .await?;
 
-            let acct_folder = account_config.get_inbox_folder_alias();
-            let archive_folder = account_config.get_folder_alias("archive");
-            let page_size = account_config.get_envelope_list_page_size();
-            let opts = ListEnvelopesOptions {
-                page: 0,
-                page_size,
-                query: None,
-            };
+                let acct_folder = account_config.get_inbox_folder_alias();
+                let archive_folder = account_config.get_folder_alias("archive");
+                let page_size = account_config.get_envelope_list_page_size();
+                let opts = ListEnvelopesOptions {
+                    page: 0,
+                    page_size,
+                    query: None,
+                };
 
-            let envelopes = backend.list_envelopes(&acct_folder, opts).await?;
+                let envelopes = backend.list_envelopes(&acct_folder, opts).await?;
 
-            Ok::<_, color_eyre::eyre::Error>((
-                backend,
-                account_config,
-                acct_folder,
-                archive_folder,
-                envelopes,
-            ))
-        }
-        .await;
+                Ok((
+                    backend,
+                    account_config,
+                    acct_folder,
+                    archive_folder,
+                    envelopes,
+                ))
+            }
+            .await;
 
-        match result {
-            Ok((backend, account_config, acct_folder, archive_folder, envelopes)) => {
+            // Pair the account name with the result so errors retain context
+            (name, result)
+        }));
+    }
+
+    // Await handles in order to preserve sorted account ordering
+    for handle in handles {
+        match handle.await {
+            Ok((name, Ok((backend, account_config, acct_folder, archive_folder, envelopes)))) => {
                 if folder == "INBOX" && !acct_folder.is_empty() {
                     folder = acct_folder.clone();
                 }
@@ -167,13 +178,13 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                     count,
                 });
 
-                backends.insert(
-                    name.clone(),
-                    (backend, account_config, acct_folder.clone(), archive_folder),
-                );
+                backends.insert(name, (backend, account_config, acct_folder, archive_folder));
+            }
+            Ok((name, Err(e))) => {
+                eprintln!("Error loading account {}: {}", name, e);
             }
             Err(e) => {
-                eprintln!("Error loading account {}: {}", name, e);
+                eprintln!("Account loading task panicked: {}", e);
             }
         }
     }

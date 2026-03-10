@@ -7,10 +7,14 @@ pub struct EnvelopeData {
     pub from: String,
     pub date: String,
     pub flags: String,
+    pub unseen: bool,
+    pub flagged: bool,
 }
 
 impl From<&Envelope> for EnvelopeData {
     fn from(env: &Envelope) -> Self {
+        use pimalaya_tui::himalaya::config::Flag;
+
         let from = env
             .from
             .name
@@ -18,16 +22,19 @@ impl From<&Envelope> for EnvelopeData {
             .unwrap_or(&env.from.addr)
             .to_string();
 
+        let unseen = !env.flags.contains(&Flag::Seen);
+        let flagged = env.flags.contains(&Flag::Flagged);
+
         let flags: Vec<&str> = env
             .flags
             .iter()
             .map(|f| match f {
-                pimalaya_tui::himalaya::config::Flag::Seen => "S",
-                pimalaya_tui::himalaya::config::Flag::Answered => "A",
-                pimalaya_tui::himalaya::config::Flag::Flagged => "F",
-                pimalaya_tui::himalaya::config::Flag::Deleted => "D",
-                pimalaya_tui::himalaya::config::Flag::Draft => "T",
-                pimalaya_tui::himalaya::config::Flag::Custom(_) => "*",
+                Flag::Seen => "S",
+                Flag::Answered => "A",
+                Flag::Flagged => "F",
+                Flag::Deleted => "D",
+                Flag::Draft => "T",
+                Flag::Custom(_) => "*",
             })
             .collect();
 
@@ -37,6 +44,8 @@ impl From<&Envelope> for EnvelopeData {
             from,
             date: env.date.clone(),
             flags: flags.join(""),
+            unseen,
+            flagged,
         }
     }
 }
@@ -87,6 +96,8 @@ mod tests {
             from: "test@example.com".to_string(),
             date: "2025-01-01 00:00".to_string(),
             flags: String::new(),
+            unseen: false,
+            flagged: false,
         }
     }
 
@@ -169,6 +180,8 @@ mod tests {
         // Flags are from a HashSet so order is nondeterministic
         assert!(data.flags.contains('S'));
         assert!(data.flags.contains('F'));
+        assert!(!data.unseen); // has Seen flag
+        assert!(data.flagged); // has Flagged flag
     }
 
     #[test]
@@ -194,5 +207,7 @@ mod tests {
         let data = EnvelopeData::from(&env);
         assert_eq!(data.from, "bob@example.com");
         assert!(data.flags.is_empty());
+        assert!(data.unseen); // no Seen flag
+        assert!(!data.flagged); // no Flagged flag
     }
 }

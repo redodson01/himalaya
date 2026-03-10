@@ -1,5 +1,24 @@
 use pimalaya_tui::himalaya::config::Envelope;
 
+/// Sort order for flag characters: Seen, Flagged, Answered, Deleted, Draft.
+fn flag_sort_key(c: &char) -> u8 {
+    match c {
+        'S' => 0,
+        'F' => 1,
+        'A' => 2,
+        'D' => 3,
+        'T' => 4,
+        _ => 5,
+    }
+}
+
+/// Sort a flags string into canonical SFADT order.
+pub fn sort_flags(flags: &str) -> String {
+    let mut chars: Vec<char> = flags.chars().collect();
+    chars.sort_by_key(flag_sort_key);
+    chars.into_iter().collect()
+}
+
 /// Owned envelope data extracted from pimalaya_tui's Envelope type.
 pub struct EnvelopeData {
     pub id: String,
@@ -33,7 +52,7 @@ impl From<&Envelope> for EnvelopeData {
         let unseen = !env.flags.contains(&Flag::Seen);
         let flagged = env.flags.contains(&Flag::Flagged);
 
-        let flags: Vec<&str> = env
+        let flags: String = env
             .flags
             .iter()
             .map(|f| match f {
@@ -45,13 +64,14 @@ impl From<&Envelope> for EnvelopeData {
                 Flag::Custom(_) => "*",
             })
             .collect();
+        let flags = sort_flags(&flags);
 
         Self {
             id: env.id.clone(),
             subject: env.subject.clone(),
             from,
             date: env.date.clone(),
-            flags: flags.join(""),
+            flags,
             unseen,
             flagged,
             account: String::new(),
@@ -258,5 +278,14 @@ mod tests {
         // Clamp at end
         app.select_next();
         assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn sort_flags_sfadt_order() {
+        assert_eq!(sort_flags("FS"), "SF");
+        assert_eq!(sort_flags("DATSF"), "SFADT");
+        assert_eq!(sort_flags("S"), "S");
+        assert_eq!(sort_flags(""), "");
+        assert_eq!(sort_flags("*F"), "F*");
     }
 }

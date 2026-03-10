@@ -163,7 +163,11 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
-    let status = Line::from(vec![
+    let chunks_bottom =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
+
+    let keybindings = Line::from(vec![
         Span::styled(" q", Style::default().fg(Color::Yellow)),
         Span::raw(": quit | "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
@@ -171,7 +175,25 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         Span::styled("j/k", Style::default().fg(Color::Yellow)),
         Span::raw(": navigate"),
     ]);
-    frame.render_widget(Paragraph::new(status), chunks[1]);
+    frame.render_widget(Paragraph::new(keybindings), chunks_bottom[0]);
+
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let flag_key = Line::from(vec![
+        Span::raw("S"),
+        Span::styled("een ", dim),
+        Span::raw("F"),
+        Span::styled("lagged ", dim),
+        Span::raw("A"),
+        Span::styled("nswered ", dim),
+        Span::raw("D"),
+        Span::styled("eleted ", dim),
+        Span::styled("Draf", dim),
+        Span::raw("T "),
+    ]);
+    frame.render_widget(
+        Paragraph::new(flag_key).alignment(ratatui::layout::Alignment::Right),
+        chunks_bottom[1],
+    );
 }
 
 fn render_message(frame: &mut Frame, content: &str, scroll: u16) {

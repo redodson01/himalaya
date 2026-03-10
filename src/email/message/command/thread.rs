@@ -95,7 +95,11 @@ impl MessageThreadCommand {
             .nodes()
             .filter_map(|e| {
                 let id = e.id.parse::<usize>().unwrap_or(0);
-                if id > 0 { Some(id) } else { None }
+                if id > 0 {
+                    Some(id)
+                } else {
+                    None
+                }
             })
             .collect();
 

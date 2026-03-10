@@ -18,3 +18,42 @@ pub fn raw_header_parser(raw_header: &str) -> Result<(String, String), String> {
         Err(format!("cannot parse raw header {raw_header:?}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_header() {
+        assert_eq!(
+            raw_header_parser("Subject: hello"),
+            Ok(("Subject".into(), "hello".into()))
+        );
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(
+            raw_header_parser("  Key  :  Val  "),
+            Ok(("Key".into(), "Val".into()))
+        );
+    }
+
+    #[test]
+    fn splits_on_first_colon_only() {
+        assert_eq!(
+            raw_header_parser("X-Custom: a:b:c"),
+            Ok(("X-Custom".into(), "a:b:c".into()))
+        );
+    }
+
+    #[test]
+    fn no_colon_is_error() {
+        assert!(raw_header_parser("nocolon").is_err());
+    }
+
+    #[test]
+    fn empty_value() {
+        assert_eq!(raw_header_parser("Key:"), Ok(("Key".into(), "".into())));
+    }
+}

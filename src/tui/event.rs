@@ -13,6 +13,7 @@ pub enum Action {
     SelectPrev,
     DeleteMessage,
     ArchiveMessage,
+    ToggleRead,
 }
 
 pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
@@ -36,6 +37,7 @@ pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
             KeyCode::Enter => Action::ReadMessage,
             KeyCode::Char('d') => Action::DeleteMessage,
             KeyCode::Char('a') => Action::ArchiveMessage,
+            KeyCode::Char('r') => Action::ToggleRead,
             _ => Action::None,
         },
         View::MessageRead { .. } => match key.code {
@@ -44,6 +46,7 @@ pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
             KeyCode::Up | KeyCode::Char('k') => Action::ScrollUp,
             KeyCode::Char('d') => Action::DeleteMessage,
             KeyCode::Char('a') => Action::ArchiveMessage,
+            KeyCode::Char('r') => Action::ToggleRead,
             _ => Action::None,
         },
     };

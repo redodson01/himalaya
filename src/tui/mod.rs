@@ -56,6 +56,7 @@ async fn run_single_account(config: TomlConfig) -> Result<()> {
                 .with_list_envelopes(BackendFeatureSource::Context)
                 .with_get_messages(BackendFeatureSource::Context)
                 .with_add_flags(BackendFeatureSource::Context)
+                .with_remove_flags(BackendFeatureSource::Context)
                 .with_delete_messages(BackendFeatureSource::Context)
                 .with_move_messages(BackendFeatureSource::Context)
         },
@@ -122,6 +123,7 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                             .with_list_envelopes(BackendFeatureSource::Context)
                             .with_get_messages(BackendFeatureSource::Context)
                             .with_add_flags(BackendFeatureSource::Context)
+                            .with_remove_flags(BackendFeatureSource::Context)
                             .with_delete_messages(BackendFeatureSource::Context)
                             .with_move_messages(BackendFeatureSource::Context)
                     })
@@ -338,6 +340,53 @@ async fn run_event_loop(
                                     }
                                 }
                                 Err(e) => error = Some(format!("Delete failed: {e}")),
+                            }
+                        }
+                    }
+                    app.status = error.map(Status::Error);
+                }
+            }
+            Action::ToggleRead => {
+                if let Some(env) = app.envelopes.get(app.selected) {
+                    let id_str = env.id.clone();
+                    let is_unseen = env.unseen;
+                    let account_key = account_key_for(app, default_account);
+
+                    let label = if is_unseen {
+                        "Marking read…"
+                    } else {
+                        "Marking unread…"
+                    };
+                    app.status = Some(Status::Working(label.to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    let mut error: Option<String> = None;
+                    if let Some((backend, _, source_folder, _)) = backends.get(&account_key) {
+                        if let Ok(id) = id_str.parse::<usize>() {
+                            let seen = Flags::from_iter([Flag::Seen]);
+                            let result = if is_unseen {
+                                backend.add_flags(source_folder, &[id], &seen).await
+                            } else {
+                                backend.remove_flags(source_folder, &[id], &seen).await
+                            };
+                            match result {
+                                Ok(_) => {
+                                    if let Some(env) = app.envelopes.get_mut(app.selected) {
+                                        if is_unseen {
+                                            env.unseen = false;
+                                            if !env.flags.contains('S') {
+                                                env.flags = sort_flags(&format!("S{}", env.flags));
+                                            }
+                                        } else {
+                                            env.unseen = true;
+                                            env.flags = env.flags.replace('S', "");
+                                        }
+                                    }
+                                    if !matches!(app.view, View::EnvelopeList) {
+                                        app.view = View::EnvelopeList;
+                                    }
+                                }
+                                Err(e) => error = Some(format!("Toggle read failed: {e}")),
                             }
                         }
                     }

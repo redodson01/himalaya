@@ -746,17 +746,18 @@ async fn run_event_loop(
                 Action::BackFromFolders => {
                     if let View::FolderList(state) = &app.view {
                         app.selected = state.saved_envelope_selected;
-                        app.view = View::EnvelopeList;
-                        refresh_envelope_list(app, backends, terminal).await;
-                    } else {
-                        let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                        if let View::MoveFolderPicker(picker) = old_view {
-                            if let Some(fe_state) = picker.folder_envelope_state {
-                                app.view = View::FolderEnvelopeList(*fe_state);
-                            } else {
-                                // Returning to main envelope list from picker
-                                refresh_envelope_list(app, backends, terminal).await;
-                            }
+                    }
+                    app.view = View::EnvelopeList;
+                    refresh_envelope_list(app, backends, terminal).await;
+                }
+                Action::CancelMove => {
+                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                    if let View::MoveFolderPicker(picker) = old_view {
+                        if let Some(fe_state) = picker.folder_envelope_state {
+                            app.view = View::FolderEnvelopeList(*fe_state);
+                        } else {
+                            // Returning to main envelope list from picker
+                            refresh_envelope_list(app, backends, terminal).await;
                         }
                     }
                 }

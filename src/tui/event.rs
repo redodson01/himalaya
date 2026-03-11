@@ -30,6 +30,7 @@ pub enum Action {
     SearchCancel,
     MoveMessage,
     ConfirmMove,
+    CancelMove,
 }
 
 pub fn handle_event(view: &View, searching: bool) -> color_eyre::Result<Action> {
@@ -112,7 +113,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             _ => Action::None,
         },
         View::MoveFolderPicker(_) => match key {
-            KeyCode::Esc | KeyCode::Char('q') => Action::BackFromFolders,
+            KeyCode::Esc | KeyCode::Char('q') => Action::CancelMove,
             KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
             KeyCode::Enter => Action::ConfirmMove,
@@ -595,18 +596,18 @@ mod tests {
     }
 
     #[test]
-    fn move_picker_esc_goes_back() {
+    fn move_picker_esc_cancels() {
         assert_eq!(
             action_for_key(&move_picker_view(), KeyCode::Esc, false),
-            Action::BackFromFolders
+            Action::CancelMove
         );
     }
 
     #[test]
-    fn move_picker_q_goes_back() {
+    fn move_picker_q_cancels() {
         assert_eq!(
             action_for_key(&move_picker_view(), KeyCode::Char('q'), false),
-            Action::BackFromFolders
+            Action::CancelMove
         );
     }
 

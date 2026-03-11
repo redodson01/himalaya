@@ -112,6 +112,15 @@ fn folder_help() {
 }
 
 #[test]
+fn account_flag_in_help() {
+    himalaya()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--account"));
+}
+
+#[test]
 fn all_flag_in_help() {
     himalaya()
         .arg("--help")

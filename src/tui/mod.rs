@@ -299,7 +299,13 @@ async fn run_event_loop(
                             ..
                         } => {
                             if matches!(action, Action::NextMessage) && !ctx.envelopes.is_empty() {
+                                let prev = ctx.selected;
                                 ctx.selected = (ctx.selected + 1).min(ctx.envelopes.len() - 1);
+                                if ctx.selected == prev {
+                                    app.status =
+                                        Some(Status::Working("No more messages".to_string()));
+                                    continue;
+                                }
                             }
                             ctx.envelopes.get(ctx.selected).map(|env| {
                                 (
@@ -315,7 +321,12 @@ async fn run_event_loop(
                 } else {
                     // Main context
                     if matches!(action, Action::NextMessage) {
+                        let prev = app.selected;
                         app.select_next();
+                        if app.selected == prev {
+                            app.status = Some(Status::Working("No more messages".to_string()));
+                            continue;
+                        }
                     }
                     app.envelopes.get(app.selected).map(|env| {
                         let account_key = account_key_for(app, default_account);

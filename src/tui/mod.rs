@@ -291,6 +291,68 @@ fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
     }
 }
 
+/// Re-fetch the main envelope list from all backends, updating app state.
+async fn refresh_envelope_list(
+    app: &mut App,
+    backends: &BackendMap,
+    terminal: &mut ratatui::DefaultTerminal,
+) {
+    app.status = Some(Status::Working("Refreshing…".to_string()));
+    terminal.draw(|frame| ui::render(frame, app)).ok();
+
+    let mut all_envelopes = Vec::new();
+    let mut sections = Vec::new();
+
+    let mut keys: Vec<String> = backends.keys().cloned().collect();
+    keys.sort();
+
+    for key in &keys {
+        if let Some((backend, account_config, folder, _)) = backends.get(key) {
+            let page_size = account_config.get_envelope_list_page_size();
+            let opts = ListEnvelopesOptions {
+                page: 0,
+                page_size,
+                query: None,
+            };
+            match backend.list_envelopes(folder, opts).await {
+                Ok(envelopes) => {
+                    let start = all_envelopes.len();
+                    let mut envelope_data: Vec<EnvelopeData> =
+                        envelopes.iter().map(EnvelopeData::from).collect();
+                    // Only set account name in multi-account mode
+                    if backends.len() > 1 {
+                        for env in &mut envelope_data {
+                            env.account = key.clone();
+                        }
+                    }
+                    let count = envelope_data.len();
+                    all_envelopes.extend(envelope_data);
+                    if backends.len() > 1 {
+                        sections.push(AccountSection {
+                            name: key.clone(),
+                            start,
+                            count,
+                        });
+                    }
+                }
+                Err(e) => {
+                    app.status = Some(Status::Error(format!("Refresh failed: {e}")));
+                    return;
+                }
+            }
+        }
+    }
+
+    app.envelopes = all_envelopes;
+    app.sections = sections;
+    if !app.envelopes.is_empty() {
+        app.selected = app.selected.min(app.envelopes.len() - 1);
+    } else {
+        app.selected = 0;
+    }
+    app.status = None;
+}
+
 async fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -460,8 +522,10 @@ async fn run_event_loop(
                     } = old_view
                     {
                         app.view = View::FolderEnvelopeList(*ctx);
+                    } else {
+                        // Returning to main envelope list — refresh from server
+                        refresh_envelope_list(app, backends, terminal).await;
                     }
-                    // else: already set to EnvelopeList by the replace
                 }
                 Action::ScrollDown => {
                     if let View::MessageRead { scroll, .. } = &mut app.view {
@@ -698,11 +762,15 @@ async fn run_event_loop(
                     if let View::FolderList(state) = &app.view {
                         app.selected = state.saved_envelope_selected;
                         app.view = View::EnvelopeList;
+                        refresh_envelope_list(app, backends, terminal).await;
                     } else {
                         let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
                         if let View::MoveFolderPicker(picker) = old_view {
                             if let Some(fe_state) = picker.folder_envelope_state {
                                 app.view = View::FolderEnvelopeList(*fe_state);
+                            } else {
+                                // Returning to main envelope list from picker
+                                refresh_envelope_list(app, backends, terminal).await;
                             }
                         }
                     }

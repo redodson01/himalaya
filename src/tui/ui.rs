@@ -442,18 +442,28 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
         None => (0..fe_state.envelopes.len()).collect(),
     };
 
-    let rows: Vec<Row> = visible_indices
-        .iter()
-        .enumerate()
-        .map(|(pos, &i)| {
-            let is_selected = if searching {
-                pos == search_selected
-            } else {
-                i == fe_state.selected
-            };
-            envelope_row(&fe_state.envelopes[i], is_selected)
-        })
-        .collect();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut item_to_table_row: Vec<usize> = Vec::new();
+
+    // Account header
+    if !visible_indices.is_empty() {
+        let style = Style::default()
+            .fg(SECTION_HEADER_COLOR)
+            .add_modifier(Modifier::BOLD);
+        let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from("")).take(11).collect();
+        cells[4] = Cell::from(fe_state.account_key.to_string()).style(style);
+        rows.push(Row::new(cells));
+    }
+
+    for (pos, &i) in visible_indices.iter().enumerate() {
+        item_to_table_row.push(rows.len());
+        let is_selected = if searching {
+            pos == search_selected
+        } else {
+            i == fe_state.selected
+        };
+        rows.push(envelope_row(&fe_state.envelopes[i], is_selected));
+    }
 
     let table = Table::new(rows, ENVELOPE_WIDTHS)
         .column_spacing(0)
@@ -472,7 +482,8 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
             .position(|&i| i == fe_state.selected)
             .unwrap_or(0)
     };
-    let mut table_state = TableState::default().with_selected(Some(highlight_pos));
+    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let mut table_state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
     if !render_search_bottom(frame, chunks[1], app) {

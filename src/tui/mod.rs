@@ -44,6 +44,15 @@ pub async fn run(config_paths: &[PathBuf], all: bool) -> Result<()> {
 }
 
 async fn run_single_account(config: TomlConfig) -> Result<()> {
+    // Determine the account name so single-account mode matches --all visually.
+    // Find the account with `default = true`, matching into_account_configs(None) logic.
+    let account_name = config
+        .accounts
+        .iter()
+        .find_map(|(name, acct)| acct.default.filter(|&d| d).map(|_| name.clone()))
+        .or_else(|| config.accounts.keys().next().cloned())
+        .unwrap_or_default();
+
     let (toml_account_config, account_config) = config
         .clone()
         .into_account_configs(None::<&str>, |c: &Config, name| c.account(name).ok())?;
@@ -81,22 +90,29 @@ async fn run_single_account(config: TomlConfig) -> Result<()> {
     };
 
     let envelopes = backend.list_envelopes(&folder, opts).await?;
-    let envelope_data: Vec<EnvelopeData> = envelopes.iter().map(EnvelopeData::from).collect();
+    let mut envelope_data: Vec<EnvelopeData> = envelopes.iter().map(EnvelopeData::from).collect();
+    for env in &mut envelope_data {
+        env.account = account_name.clone();
+    }
+    let count = envelope_data.len();
 
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
 
-    let mut app = App::new(envelope_data, folder.clone());
+    let sections = vec![AccountSection {
+        name: account_name.clone(),
+        start: 0,
+        count,
+    }];
+    let mut app = App::new(envelope_data, folder.clone()).with_sections(sections);
 
-    // Store backends keyed by account name for message reading
     let mut backends = HashMap::new();
-    let default_account = String::new();
     backends.insert(
-        default_account.clone(),
+        account_name.clone(),
         (backend, account_config, folder.clone(), archive_folder),
     );
 
-    run_event_loop(&mut terminal, &mut app, &backends, &default_account).await
+    run_event_loop(&mut terminal, &mut app, &backends, &account_name).await
 }
 
 async fn run_all_accounts(config: TomlConfig) -> Result<()> {
@@ -319,21 +335,16 @@ async fn refresh_envelope_list(
                     let start = all_envelopes.len();
                     let mut envelope_data: Vec<EnvelopeData> =
                         envelopes.iter().map(EnvelopeData::from).collect();
-                    // Only set account name in multi-account mode
-                    if backends.len() > 1 {
-                        for env in &mut envelope_data {
-                            env.account = key.clone();
-                        }
+                    for env in &mut envelope_data {
+                        env.account = key.clone();
                     }
                     let count = envelope_data.len();
                     all_envelopes.extend(envelope_data);
-                    if backends.len() > 1 {
-                        sections.push(AccountSection {
-                            name: key.clone(),
-                            start,
-                            count,
-                        });
-                    }
+                    sections.push(AccountSection {
+                        name: key.clone(),
+                        start,
+                        count,
+                    });
                 }
                 Err(e) => {
                     app.status = Some(Status::Error(format!("Refresh failed: {e}")));
@@ -676,57 +687,31 @@ async fn run_event_loop(
                     let mut sections = Vec::new();
                     let mut error: Option<String> = None;
 
-                    if default_account.is_empty() && backends.len() > 1 {
-                        // Multi-account mode
-                        let mut keys: Vec<String> = backends.keys().cloned().collect();
-                        keys.sort();
-                        for key in &keys {
-                            if let Some((backend, _, _, _)) = backends.get(key) {
-                                match backend.list_folders().await {
-                                    Ok(account_folders) => {
-                                        let start = folders.len();
-                                        let account_folders: Vec<email::folder::Folder> =
-                                            account_folders.into();
-                                        let count = account_folders.len();
-                                        for f in account_folders {
-                                            folders.push(FolderEntry {
-                                                name: f.name,
-                                                account: key.clone(),
-                                            });
-                                        }
-                                        sections.push(FolderSection {
-                                            name: key.clone(),
-                                            start,
-                                            count,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        error =
-                                            Some(format!("Error loading folders for {key}: {e}"));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Single-account mode
-                        let key = if backends.contains_key(default_account) {
-                            default_account.to_string()
-                        } else {
-                            backends.keys().next().cloned().unwrap_or_default()
-                        };
-                        if let Some((backend, _, _, _)) = backends.get(&key) {
+                    let mut keys: Vec<String> = backends.keys().cloned().collect();
+                    keys.sort();
+                    for key in &keys {
+                        if let Some((backend, _, _, _)) = backends.get(key) {
                             match backend.list_folders().await {
                                 Ok(account_folders) => {
-                                    for f in account_folders.into_iter() {
+                                    let start = folders.len();
+                                    let account_folders: Vec<email::folder::Folder> =
+                                        account_folders.into();
+                                    let count = account_folders.len();
+                                    for f in account_folders {
                                         folders.push(FolderEntry {
                                             name: f.name,
                                             account: key.clone(),
                                         });
                                     }
+                                    sections.push(FolderSection {
+                                        name: key.clone(),
+                                        start,
+                                        count,
+                                    });
                                 }
                                 Err(e) => {
-                                    error = Some(format!("Error loading folders: {e}"));
+                                    error = Some(format!("Error loading folders for {key}: {e}"));
+                                    break;
                                 }
                             }
                         }

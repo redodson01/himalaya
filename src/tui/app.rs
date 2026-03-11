@@ -274,15 +274,15 @@ impl App {
     }
 
     pub fn search_push_char(&mut self, c: char) {
-        if self.search.is_some() {
-            self.search.as_mut().unwrap().query.push(c);
+        if let Some(search) = &mut self.search {
+            search.query.push(c);
             self.recompute_search_matches();
         }
     }
 
     pub fn search_pop_char(&mut self) {
-        if self.search.is_some() {
-            self.search.as_mut().unwrap().query.pop();
+        if let Some(search) = &mut self.search {
+            search.query.pop();
             self.recompute_search_matches();
         }
     }
@@ -321,7 +321,7 @@ impl App {
             return;
         }
 
-        let mut matcher = Matcher::new(MatcherConfig::DEFAULT.match_paths());
+        let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
         let pattern = Pattern::new(
             &search.query,
             CaseMatching::Ignore,

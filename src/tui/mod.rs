@@ -534,9 +534,6 @@ async fn handle_compose(
         std::env::set_var("EDITOR", "vim");
     }
 
-    // Remove stale local draft so the editor starts fresh
-    email::email::utils::remove_local_draft().ok();
-
     // Suspend TUI
     ratatui::restore();
 

@@ -31,6 +31,10 @@ pub enum Action {
     MoveMessage,
     ConfirmMove,
     CancelMove,
+    ComposeMessage,
+    ReplyMessage,
+    ReplyAllMessage,
+    ForwardMessage,
 }
 
 pub fn handle_event(view: &View, searching: bool) -> color_eyre::Result<Action> {
@@ -75,6 +79,10 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
             KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('N') => Action::ComposeMessage,
+            KeyCode::Char('R') => Action::ReplyMessage,
+            KeyCode::Char('A') => Action::ReplyAllMessage,
+            KeyCode::Char('F') => Action::ForwardMessage,
             KeyCode::Char('\\') => Action::OpenFolderList,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
@@ -97,6 +105,10 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
             KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('N') => Action::ComposeMessage,
+            KeyCode::Char('R') => Action::ReplyMessage,
+            KeyCode::Char('A') => Action::ReplyAllMessage,
+            KeyCode::Char('F') => Action::ForwardMessage,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
@@ -110,6 +122,10 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('n') => Action::NextMessage,
             KeyCode::Char('f') => Action::ToggleFlag,
             KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('N') => Action::ComposeMessage,
+            KeyCode::Char('R') => Action::ReplyMessage,
+            KeyCode::Char('A') => Action::ReplyAllMessage,
+            KeyCode::Char('F') => Action::ForwardMessage,
             _ => Action::None,
         },
         View::MoveFolderPicker(_) => match key {
@@ -648,6 +664,104 @@ mod tests {
         assert_eq!(
             action_for_key(&move_picker_view(), KeyCode::Char('z'), false),
             Action::None
+        );
+    }
+
+    // --- Compose keybindings ---
+
+    #[test]
+    fn list_n_composes() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('N'), false),
+            Action::ComposeMessage
+        );
+    }
+
+    #[test]
+    fn list_r_replies() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('R'), false),
+            Action::ReplyMessage
+        );
+    }
+
+    #[test]
+    fn list_a_reply_all() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('A'), false),
+            Action::ReplyAllMessage
+        );
+    }
+
+    #[test]
+    fn list_f_forwards() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('F'), false),
+            Action::ForwardMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_n_composes() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('N'), false),
+            Action::ComposeMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_r_replies() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('R'), false),
+            Action::ReplyMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_a_reply_all() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('A'), false),
+            Action::ReplyAllMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_f_forwards() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('F'), false),
+            Action::ForwardMessage
+        );
+    }
+
+    #[test]
+    fn message_n_composes() {
+        assert_eq!(
+            action_for_key(&message_view(), KeyCode::Char('N'), false),
+            Action::ComposeMessage
+        );
+    }
+
+    #[test]
+    fn message_r_replies() {
+        assert_eq!(
+            action_for_key(&message_view(), KeyCode::Char('R'), false),
+            Action::ReplyMessage
+        );
+    }
+
+    #[test]
+    fn message_a_reply_all() {
+        assert_eq!(
+            action_for_key(&message_view(), KeyCode::Char('A'), false),
+            Action::ReplyAllMessage
+        );
+    }
+
+    #[test]
+    fn message_f_forwards() {
+        assert_eq!(
+            action_for_key(&message_view(), KeyCode::Char('F'), false),
+            Action::ForwardMessage
         );
     }
 }

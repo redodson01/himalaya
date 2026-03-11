@@ -142,6 +142,20 @@ fn toggle_labels(env: Option<&EnvelopeData>) -> (&'static str, &'static str) {
     }
 }
 
+/// Build the compose hints line shown on the second row of the bottom bar.
+fn compose_hints_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" N", Style::default().fg(Color::Yellow)),
+        Span::raw(": new | "),
+        Span::styled("R", Style::default().fg(Color::Yellow)),
+        Span::raw(": reply | "),
+        Span::styled("A", Style::default().fg(Color::Yellow)),
+        Span::raw(": reply all | "),
+        Span::styled("F", Style::default().fg(Color::Yellow)),
+        Span::raw(": forward"),
+    ])
+}
+
 /// Renders the flag legend (Seen Flagged Answered Deleted drafT) into the
 /// given area, right-aligned.
 fn render_flag_legend(frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -196,7 +210,7 @@ fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &Ap
 }
 
 fn render_envelope_list(frame: &mut Frame, app: &App) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
     let searching = app.search.is_some();
     let matched_indices = app.search.as_ref().map(|s| &s.matched_indices[..]);
@@ -285,9 +299,11 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
     if !render_search_bottom(frame, chunks[1], app) {
+        let rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
         let chunks_bottom =
             Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[1]);
+                .split(rows[0]);
 
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
@@ -326,6 +342,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
         render_flag_legend(frame, chunks_bottom[1]);
+        frame.render_widget(Paragraph::new(compose_hints_line()), rows[1]);
     }
 }
 
@@ -432,7 +449,7 @@ fn render_folder_list(
 }
 
 fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState, app: &App) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
     let searching = app.search.is_some();
     let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
@@ -487,9 +504,11 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
     if !render_search_bottom(frame, chunks[1], app) {
+        let rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
         let chunks_bottom =
             Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[1]);
+                .split(rows[0]);
 
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
@@ -526,6 +545,7 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
         };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
         render_flag_legend(frame, chunks_bottom[1]);
+        frame.render_widget(Paragraph::new(compose_hints_line()), rows[1]);
     }
 }
 
@@ -616,7 +636,7 @@ fn render_message(
     app: &App,
     active_env: Option<&EnvelopeData>,
 ) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
     // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
     // Headers only appear before the first blank line.
@@ -664,9 +684,9 @@ fn render_message(
 
     frame.render_widget(paragraph, chunks[0]);
 
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
     let chunks_bottom =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(chunks[1]);
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).split(rows[0]);
 
     let status_line = if let Some(s) = &app.status {
         let (msg, color) = match s {
@@ -701,6 +721,7 @@ fn render_message(
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
     render_flag_legend(frame, chunks_bottom[1]);
+    frame.render_widget(Paragraph::new(compose_hints_line()), rows[1]);
 }
 
 /// Check if a line looks like an email header (e.g. "From: ...", "Subject: ...").

@@ -540,22 +540,24 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
-| `g` | Open folder list |
+| `\` | Open folder list |
+| `/` | Search / filter list |
 
 ### Folder list
 
 | Key | Action |
 |-----|--------|
-| `Esc` / `b` | Back to envelope list |
+| `Esc` / `q` | Back to envelope list |
 | `j` / `Down` | Select next folder |
 | `k` / `Up` | Select previous folder |
 | `Enter` | Open selected folder |
+| `/` | Search / filter list |
 
 ### Folder envelope list
 
 | Key | Action |
 |-----|--------|
-| `Esc` / `b` | Back to folder list |
+| `Esc` / `q` | Back to folder list |
 | `j` / `Down` | Select next envelope |
 | `k` / `Up` | Select previous envelope |
 | `Enter` | Read selected message |
@@ -563,12 +565,13 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `/` | Search / filter list |
 
 ### Message view
 
 | Key | Action |
 |-----|--------|
-| `Esc` / `b` | Back to envelope list |
+| `Esc` / `q` | Back to envelope list |
 | `j` / `Down` | Scroll down |
 | `k` / `Up` | Scroll up |
 | `n` | Open next message |

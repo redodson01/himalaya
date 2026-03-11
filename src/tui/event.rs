@@ -28,6 +28,9 @@ pub enum Action {
     SearchBackspace,
     SearchConfirm,
     SearchCancel,
+    MoveMessage,
+    ConfirmMove,
+    CancelMove,
 }
 
 pub fn handle_event(view: &View, searching: bool) -> color_eyre::Result<Action> {
@@ -71,6 +74,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('a') => Action::ArchiveMessage,
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
+            KeyCode::Char('m') => Action::MoveMessage,
             KeyCode::Char('\\') => Action::OpenFolderList,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
@@ -92,6 +96,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('a') => Action::ArchiveMessage,
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
+            KeyCode::Char('m') => Action::MoveMessage,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
@@ -104,6 +109,15 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('n') => Action::NextMessage,
             KeyCode::Char('f') => Action::ToggleFlag,
+            KeyCode::Char('m') => Action::MoveMessage,
+            _ => Action::None,
+        },
+        View::MoveFolderPicker(_) => match key {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CancelMove,
+            KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
+            KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
+            KeyCode::Enter => Action::ConfirmMove,
+            KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
     }
@@ -536,6 +550,104 @@ mod tests {
         assert_eq!(
             action_for_key(&list_view(), KeyCode::Up, true),
             Action::SelectPrev
+        );
+    }
+
+    // --- MoveMessage keybinding ---
+
+    #[test]
+    fn list_m_moves_message() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('m'), false),
+            Action::MoveMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_m_moves_message() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('m'), false),
+            Action::MoveMessage
+        );
+    }
+
+    #[test]
+    fn message_m_moves_message() {
+        assert_eq!(
+            action_for_key(&message_view(), KeyCode::Char('m'), false),
+            Action::MoveMessage
+        );
+    }
+
+    // --- MoveFolderPicker keybindings ---
+
+    fn move_picker_view() -> View {
+        use crate::tui::app::MoveFolderPickerState;
+        View::MoveFolderPicker(MoveFolderPickerState {
+            folders: Vec::new(),
+            selected: 0,
+            source_envelope_id: String::new(),
+            source_envelope_index: 0,
+            source_folder: String::new(),
+            account_key: String::new(),
+            return_to_folder: false,
+            folder_envelope_state: None,
+        })
+    }
+
+    #[test]
+    fn move_picker_esc_cancels() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Esc, false),
+            Action::CancelMove
+        );
+    }
+
+    #[test]
+    fn move_picker_q_cancels() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Char('q'), false),
+            Action::CancelMove
+        );
+    }
+
+    #[test]
+    fn move_picker_j_selects_next() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Char('j'), false),
+            Action::FolderSelectNext
+        );
+    }
+
+    #[test]
+    fn move_picker_k_selects_prev() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Char('k'), false),
+            Action::FolderSelectPrev
+        );
+    }
+
+    #[test]
+    fn move_picker_enter_confirms_move() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Enter, false),
+            Action::ConfirmMove
+        );
+    }
+
+    #[test]
+    fn move_picker_slash_starts_search() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Char('/'), false),
+            Action::StartSearch
+        );
+    }
+
+    #[test]
+    fn move_picker_unknown_is_none() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), KeyCode::Char('z'), false),
+            Action::None
         );
     }
 }

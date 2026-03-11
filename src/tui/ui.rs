@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 use crate::tui::app::{
-    App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection, Status, View,
+    App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection, MoveFolderPickerState,
+    Status, View,
 };
 
 const FROM_COLOR: Color = Color::Cyan;
@@ -120,6 +121,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             render_folder_list(frame, &state.folders, &state.sections, state.selected, app)
         }
         View::FolderEnvelopeList(state) => render_folder_envelope_list(frame, state, app),
+        View::MoveFolderPicker(state) => render_move_folder_picker(frame, state, app),
     }
 }
 
@@ -314,6 +316,8 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
                 Span::raw(": delete | "),
                 Span::styled("a", Style::default().fg(Color::Yellow)),
                 Span::raw(": archive | "),
+                Span::styled("m", Style::default().fg(Color::Yellow)),
+                Span::raw(": move | "),
                 Span::styled("\\", Style::default().fg(Color::Yellow)),
                 Span::raw(": folders | "),
                 Span::styled("/", Style::default().fg(Color::Yellow)),
@@ -438,18 +442,28 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
         None => (0..fe_state.envelopes.len()).collect(),
     };
 
-    let rows: Vec<Row> = visible_indices
-        .iter()
-        .enumerate()
-        .map(|(pos, &i)| {
-            let is_selected = if searching {
-                pos == search_selected
-            } else {
-                i == fe_state.selected
-            };
-            envelope_row(&fe_state.envelopes[i], is_selected)
-        })
-        .collect();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut item_to_table_row: Vec<usize> = Vec::new();
+
+    // Account header
+    if !visible_indices.is_empty() {
+        let style = Style::default()
+            .fg(SECTION_HEADER_COLOR)
+            .add_modifier(Modifier::BOLD);
+        let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from("")).take(11).collect();
+        cells[4] = Cell::from(fe_state.account_key.to_string()).style(style);
+        rows.push(Row::new(cells));
+    }
+
+    for (pos, &i) in visible_indices.iter().enumerate() {
+        item_to_table_row.push(rows.len());
+        let is_selected = if searching {
+            pos == search_selected
+        } else {
+            i == fe_state.selected
+        };
+        rows.push(envelope_row(&fe_state.envelopes[i], is_selected));
+    }
 
     let table = Table::new(rows, ENVELOPE_WIDTHS)
         .column_spacing(0)
@@ -468,7 +482,8 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
             .position(|&i| i == fe_state.selected)
             .unwrap_or(0)
     };
-    let mut table_state = TableState::default().with_selected(Some(highlight_pos));
+    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let mut table_state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
     if !render_search_bottom(frame, chunks[1], app) {
@@ -503,12 +518,94 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
                 Span::raw(": delete | "),
                 Span::styled("a", Style::default().fg(Color::Yellow)),
                 Span::raw(": archive | "),
+                Span::styled("m", Style::default().fg(Color::Yellow)),
+                Span::raw(": move | "),
                 Span::styled("/", Style::default().fg(Color::Yellow)),
                 Span::raw(": search"),
             ])
         };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
         render_flag_legend(frame, chunks_bottom[1]);
+    }
+}
+
+fn render_move_folder_picker(frame: &mut Frame, state: &MoveFolderPickerState, app: &App) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+
+    let searching = app.search.is_some();
+    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
+
+    let visible_indices: Vec<usize> = match app.search.as_ref() {
+        Some(s) => s.matched_indices.clone(),
+        None => (0..state.folders.len()).collect(),
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut folder_to_table_row: Vec<usize> = Vec::new();
+
+    // Account header before the first folder
+    if !visible_indices.is_empty() {
+        rows.push(Row::new([Cell::from("")]));
+        let style = Style::default()
+            .fg(SECTION_HEADER_COLOR)
+            .add_modifier(Modifier::BOLD);
+        rows.push(Row::new([
+            Cell::from(format!("  {}", state.account_key)).style(style)
+        ]));
+    }
+
+    for &i in visible_indices.iter() {
+        folder_to_table_row.push(rows.len());
+        rows.push(Row::new([Cell::from(format!(
+            "  {}",
+            state.folders[i].name
+        ))]));
+    }
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .column_spacing(0)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Move to Folder "),
+        );
+
+    let highlight_pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == state.selected)
+            .unwrap_or(0)
+    };
+    let table_selected = folder_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let mut table_state = TableState::default().with_selected(Some(table_selected));
+    frame.render_stateful_widget(table, chunks[0], &mut table_state);
+
+    if !render_search_bottom(frame, chunks[1], app) {
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": cancel | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": move here | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
+        };
+        frame.render_widget(Paragraph::new(status_line), chunks[1]);
     }
 }
 
@@ -597,7 +694,9 @@ fn render_message(
             Span::styled("d", Style::default().fg(Color::Yellow)),
             Span::raw(": delete | "),
             Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(": archive"),
+            Span::raw(": archive | "),
+            Span::styled("m", Style::default().fg(Color::Yellow)),
+            Span::raw(": move"),
         ])
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);

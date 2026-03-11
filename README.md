@@ -540,6 +540,7 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `m` | Move message to folder |
 | `\` | Open folder list |
 | `/` | Search / filter list |
 
@@ -565,6 +566,7 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `m` | Move message to folder |
 | `/` | Search / filter list |
 
 ### Message view
@@ -579,6 +581,17 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `m` | Move message to folder |
+
+### Move folder picker
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Cancel and go back |
+| `j` / `Down` | Select next folder |
+| `k` / `Up` | Select previous folder |
+| `Enter` | Move message to selected folder |
+| `/` | Search / filter list |
 
 ## FAQ
 

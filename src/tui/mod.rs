@@ -20,7 +20,7 @@ use crate::config::TomlConfig;
 
 use self::app::{
     sort_flags, AccountSection, App, EnvelopeData, FolderEntry, FolderEnvelopeState,
-    FolderListState, FolderSection, Status, View,
+    FolderListState, FolderSection, MoveFolderPickerState, Status, View,
 };
 use self::event::{handle_event, Action};
 
@@ -44,6 +44,15 @@ pub async fn run(config_paths: &[PathBuf], all: bool) -> Result<()> {
 }
 
 async fn run_single_account(config: TomlConfig) -> Result<()> {
+    // Determine the account name so single-account mode matches --all visually.
+    // Find the account with `default = true`, matching into_account_configs(None) logic.
+    let account_name = config
+        .accounts
+        .iter()
+        .find_map(|(name, acct)| acct.default.filter(|&d| d).map(|_| name.clone()))
+        .or_else(|| config.accounts.keys().next().cloned())
+        .unwrap_or_default();
+
     let (toml_account_config, account_config) = config
         .clone()
         .into_account_configs(None::<&str>, |c: &Config, name| c.account(name).ok())?;
@@ -81,22 +90,29 @@ async fn run_single_account(config: TomlConfig) -> Result<()> {
     };
 
     let envelopes = backend.list_envelopes(&folder, opts).await?;
-    let envelope_data: Vec<EnvelopeData> = envelopes.iter().map(EnvelopeData::from).collect();
+    let mut envelope_data: Vec<EnvelopeData> = envelopes.iter().map(EnvelopeData::from).collect();
+    for env in &mut envelope_data {
+        env.account = account_name.clone();
+    }
+    let count = envelope_data.len();
 
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
 
-    let mut app = App::new(envelope_data, folder.clone());
+    let sections = vec![AccountSection {
+        name: account_name.clone(),
+        start: 0,
+        count,
+    }];
+    let mut app = App::new(envelope_data, folder.clone()).with_sections(sections);
 
-    // Store backends keyed by account name for message reading
     let mut backends = HashMap::new();
-    let default_account = String::new();
     backends.insert(
-        default_account.clone(),
+        account_name.clone(),
         (backend, account_config, folder.clone(), archive_folder),
     );
 
-    run_event_loop(&mut terminal, &mut app, &backends, &default_account).await
+    run_event_loop(&mut terminal, &mut app, &backends, &account_name).await
 }
 
 async fn run_all_accounts(config: TomlConfig) -> Result<()> {
@@ -291,6 +307,63 @@ fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
     }
 }
 
+/// Re-fetch the main envelope list from all backends, updating app state.
+async fn refresh_envelope_list(
+    app: &mut App,
+    backends: &BackendMap,
+    terminal: &mut ratatui::DefaultTerminal,
+) {
+    app.status = Some(Status::Working("Refreshing…".to_string()));
+    terminal.draw(|frame| ui::render(frame, app)).ok();
+
+    let mut all_envelopes = Vec::new();
+    let mut sections = Vec::new();
+
+    let mut keys: Vec<String> = backends.keys().cloned().collect();
+    keys.sort();
+
+    for key in &keys {
+        if let Some((backend, account_config, folder, _)) = backends.get(key) {
+            let page_size = account_config.get_envelope_list_page_size();
+            let opts = ListEnvelopesOptions {
+                page: 0,
+                page_size,
+                query: None,
+            };
+            match backend.list_envelopes(folder, opts).await {
+                Ok(envelopes) => {
+                    let start = all_envelopes.len();
+                    let mut envelope_data: Vec<EnvelopeData> =
+                        envelopes.iter().map(EnvelopeData::from).collect();
+                    for env in &mut envelope_data {
+                        env.account = key.clone();
+                    }
+                    let count = envelope_data.len();
+                    all_envelopes.extend(envelope_data);
+                    sections.push(AccountSection {
+                        name: key.clone(),
+                        start,
+                        count,
+                    });
+                }
+                Err(e) => {
+                    app.status = Some(Status::Error(format!("Refresh failed: {e}")));
+                    return;
+                }
+            }
+        }
+    }
+
+    app.envelopes = all_envelopes;
+    app.sections = sections;
+    if !app.envelopes.is_empty() {
+        app.selected = app.selected.min(app.envelopes.len() - 1);
+    } else {
+        app.selected = 0;
+    }
+    app.status = None;
+}
+
 async fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -460,8 +533,10 @@ async fn run_event_loop(
                     } = old_view
                     {
                         app.view = View::FolderEnvelopeList(*ctx);
+                    } else {
+                        // Returning to main envelope list — refresh from server
+                        refresh_envelope_list(app, backends, terminal).await;
                     }
-                    // else: already set to EnvelopeList by the replace
                 }
                 Action::ScrollDown => {
                     if let View::MessageRead { scroll, .. } = &mut app.view {
@@ -612,57 +687,31 @@ async fn run_event_loop(
                     let mut sections = Vec::new();
                     let mut error: Option<String> = None;
 
-                    if default_account.is_empty() && backends.len() > 1 {
-                        // Multi-account mode
-                        let mut keys: Vec<String> = backends.keys().cloned().collect();
-                        keys.sort();
-                        for key in &keys {
-                            if let Some((backend, _, _, _)) = backends.get(key) {
-                                match backend.list_folders().await {
-                                    Ok(account_folders) => {
-                                        let start = folders.len();
-                                        let account_folders: Vec<email::folder::Folder> =
-                                            account_folders.into();
-                                        let count = account_folders.len();
-                                        for f in account_folders {
-                                            folders.push(FolderEntry {
-                                                name: f.name,
-                                                account: key.clone(),
-                                            });
-                                        }
-                                        sections.push(FolderSection {
-                                            name: key.clone(),
-                                            start,
-                                            count,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        error =
-                                            Some(format!("Error loading folders for {key}: {e}"));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Single-account mode
-                        let key = if backends.contains_key(default_account) {
-                            default_account.to_string()
-                        } else {
-                            backends.keys().next().cloned().unwrap_or_default()
-                        };
-                        if let Some((backend, _, _, _)) = backends.get(&key) {
+                    let mut keys: Vec<String> = backends.keys().cloned().collect();
+                    keys.sort();
+                    for key in &keys {
+                        if let Some((backend, _, _, _)) = backends.get(key) {
                             match backend.list_folders().await {
                                 Ok(account_folders) => {
-                                    for f in account_folders.into_iter() {
+                                    let start = folders.len();
+                                    let account_folders: Vec<email::folder::Folder> =
+                                        account_folders.into();
+                                    let count = account_folders.len();
+                                    for f in account_folders {
                                         folders.push(FolderEntry {
                                             name: f.name,
                                             account: key.clone(),
                                         });
                                     }
+                                    sections.push(FolderSection {
+                                        name: key.clone(),
+                                        start,
+                                        count,
+                                    });
                                 }
                                 Err(e) => {
-                                    error = Some(format!("Error loading folders: {e}"));
+                                    error = Some(format!("Error loading folders for {key}: {e}"));
+                                    break;
                                 }
                             }
                         }
@@ -699,6 +748,18 @@ async fn run_event_loop(
                         app.selected = state.saved_envelope_selected;
                     }
                     app.view = View::EnvelopeList;
+                    refresh_envelope_list(app, backends, terminal).await;
+                }
+                Action::CancelMove => {
+                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                    if let View::MoveFolderPicker(picker) = old_view {
+                        if let Some(fe_state) = picker.folder_envelope_state {
+                            app.view = View::FolderEnvelopeList(*fe_state);
+                        } else {
+                            // Returning to main envelope list from picker
+                            refresh_envelope_list(app, backends, terminal).await;
+                        }
+                    }
                 }
                 Action::BackFromFolderEnvelopes => {
                     let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
@@ -787,6 +848,7 @@ async fn run_event_loop(
                             Some(Action::ReadMessage)
                         }
                         View::FolderList(_) => Some(Action::SelectFolder),
+                        View::MoveFolderPicker(_) => Some(Action::ConfirmMove),
                         _ => None,
                     };
                     if app.confirm_search() {
@@ -844,6 +906,148 @@ async fn run_event_loop(
                             }
                         }
                         app.status = error.map(Status::Error);
+                    }
+                }
+                Action::MoveMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let (id_str, account_key, source_folder, env_index) = (
+                            ctx.id.clone(),
+                            ctx.account_key.clone(),
+                            ctx.folder.clone(),
+                            {
+                                match &app.view {
+                                    View::FolderEnvelopeList(state) => state.selected,
+                                    View::MessageRead {
+                                        folder_context: Some(fctx),
+                                        ..
+                                    } => fctx.selected,
+                                    _ => app.selected,
+                                }
+                            },
+                        );
+
+                        app.status = Some(Status::Working("Loading folders…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let mut folders = Vec::new();
+                        let mut error: Option<String> = None;
+
+                        if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                            match backend.list_folders().await {
+                                Ok(account_folders) => {
+                                    let account_folders: Vec<email::folder::Folder> =
+                                        account_folders.into();
+                                    for f in account_folders {
+                                        if f.name != source_folder {
+                                            folders.push(FolderEntry {
+                                                name: f.name,
+                                                account: account_key.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error = Some(format!("Error loading folders: {e}"));
+                                }
+                            }
+                        }
+
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        } else if folders.is_empty() {
+                            app.status =
+                                Some(Status::Error("No other folders available".to_string()));
+                        } else {
+                            app.status = None;
+                            // Extract FolderEnvelopeState if in folder context
+                            let fe_state = if in_folder_context {
+                                let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                                match old_view {
+                                    View::FolderEnvelopeList(s) => Some(Box::new(s)),
+                                    View::MessageRead {
+                                        folder_context: Some(ctx),
+                                        ..
+                                    } => Some(ctx),
+                                    _ => None,
+                                }
+                            } else {
+                                // If in MessageRead without folder context, go back to list
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::EnvelopeList;
+                                }
+                                None
+                            };
+
+                            app.view = View::MoveFolderPicker(MoveFolderPickerState {
+                                folders,
+                                selected: 0,
+                                source_envelope_id: id_str,
+                                source_envelope_index: env_index,
+                                source_folder,
+                                account_key,
+                                return_to_folder: in_folder_context,
+                                folder_envelope_state: fe_state,
+                            });
+                        }
+                    }
+                }
+                Action::ConfirmMove => {
+                    if let View::MoveFolderPicker(ref state) = app.view {
+                        if let Some(target) = state.folders.get(state.selected) {
+                            let target_name = target.name.clone();
+                            let source_folder = state.source_folder.clone();
+                            let id_str = state.source_envelope_id.clone();
+                            let account_key = state.account_key.clone();
+                            let return_to_folder = state.return_to_folder;
+
+                            app.status = Some(Status::Working(format!("Moving to {target_name}…")));
+                            terminal.draw(|frame| ui::render(frame, app))?;
+
+                            let mut error: Option<String> = None;
+                            if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                                if let Ok(id) = id_str.parse::<usize>() {
+                                    match backend
+                                        .move_messages(&source_folder, &target_name, &[id])
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            // Take the picker state
+                                            let old_view = std::mem::replace(
+                                                &mut app.view,
+                                                View::EnvelopeList,
+                                            );
+                                            if let View::MoveFolderPicker(picker) = old_view {
+                                                if return_to_folder {
+                                                    if let Some(mut fe_state) =
+                                                        picker.folder_envelope_state
+                                                    {
+                                                        fe_state.remove_envelope(
+                                                            picker.source_envelope_index,
+                                                        );
+                                                        app.view =
+                                                            View::FolderEnvelopeList(*fe_state);
+                                                    }
+                                                } else {
+                                                    app.remove_envelope(
+                                                        picker.source_envelope_index,
+                                                    );
+                                                    // already set to EnvelopeList
+                                                }
+                                            }
+                                            app.status = Some(Status::Working(format!(
+                                                "Moved to {target_name}"
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            error = Some(format!("Move failed: {e}"));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(err) = error {
+                                app.status = Some(Status::Error(err));
+                            }
+                        }
                     }
                 }
             }

@@ -1259,9 +1259,11 @@ async fn run_event_loop(
                     if backends.len() > 1 {
                         let mut accounts: Vec<String> = backends.keys().cloned().collect();
                         accounts.sort();
+                        let previous_view = std::mem::replace(&mut app.view, View::EnvelopeList);
                         app.view = View::AccountPicker(AccountPickerState {
                             accounts,
                             selected: 0,
+                            previous_view: Box::new(previous_view),
                         });
                     } else {
                         handle_compose(
@@ -1277,10 +1279,12 @@ async fn run_event_loop(
                     }
                 }
                 Action::ConfirmAccountPicker => {
-                    if let View::AccountPicker(ref state) = app.view {
+                    if let View::AccountPicker(state) =
+                        std::mem::replace(&mut app.view, View::EnvelopeList)
+                    {
                         if let Some(account_key) = state.accounts.get(state.selected) {
                             let key = account_key.clone();
-                            app.view = View::EnvelopeList;
+                            app.view = *state.previous_view;
                             handle_compose(
                                 app,
                                 terminal,
@@ -1295,7 +1299,11 @@ async fn run_event_loop(
                     }
                 }
                 Action::CancelAccountPicker => {
-                    app.view = View::EnvelopeList;
+                    if let View::AccountPicker(state) =
+                        std::mem::replace(&mut app.view, View::EnvelopeList)
+                    {
+                        app.view = *state.previous_view;
+                    }
                 }
                 Action::ReplyMessage => {
                     handle_compose(

@@ -605,6 +605,16 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `Enter` | Move message to selected folder |
 | `/` | Search / filter list |
 
+### Account picker (multi-account compose)
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Cancel and go back |
+| `j` / `Down` | Select next account |
+| `k` / `Up` | Select previous account |
+| `Enter` | Compose from selected account |
+| `/` | Search / filter list |
+
 ## FAQ
 
 <details>

@@ -782,6 +782,7 @@ mod tests {
         View::AccountPicker(AccountPickerState {
             accounts: vec!["work".to_string(), "personal".to_string()],
             selected: 0,
+            previous_view: Box::new(View::EnvelopeList),
         })
     }
 

@@ -73,6 +73,24 @@ pub enum MessageSubcommand {
 }
 
 impl MessageSubcommand {
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::Read(cmd) => cmd.account.name = Some(name),
+            Self::Export(cmd) => cmd.account.name = Some(name),
+            Self::Thread(cmd) => cmd.account.name = Some(name),
+            Self::Write(cmd) => cmd.account.name = Some(name),
+            Self::Reply(cmd) => cmd.account.name = Some(name),
+            Self::Forward(cmd) => cmd.account.name = Some(name),
+            Self::Edit(cmd) => cmd.account.name = Some(name),
+            Self::Mailto(cmd) => cmd.account.name = Some(name),
+            Self::Save(cmd) => cmd.account.name = Some(name),
+            Self::Send(cmd) => cmd.account.name = Some(name),
+            Self::Copy(cmd) => cmd.account.name = Some(name),
+            Self::Move(cmd) => cmd.account.name = Some(name),
+            Self::Delete(cmd) => cmd.account.name = Some(name),
+        }
+    }
+
     #[allow(unused)]
     pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         match self {

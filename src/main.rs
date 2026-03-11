@@ -45,16 +45,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut printer = StdoutPrinter::new(cli.output);
     let res = match cli.command {
-        Some(cmd) => {
+        Some(mut cmd) => {
             if cli.tui {
                 color_eyre::eyre::bail!("--tui cannot be used with subcommands");
+            }
+            if let Some(name) = cli.account {
+                cmd.set_account(name);
             }
             cmd.execute(&mut printer, cli.config_paths.as_ref(), cli.all)
                 .await
         }
         None => {
             if cli.tui {
-                himalaya::tui::run(cli.config_paths.as_ref(), cli.all).await
+                himalaya::tui::run(cli.config_paths.as_ref(), cli.all, cli.account).await
             } else if cli.all {
                 let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
                 let mut account_names: Vec<&String> = config.accounts.keys().collect();
@@ -70,9 +73,9 @@ async fn main() -> Result<()> {
                 Ok(())
             } else {
                 let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
-                EnvelopeListCommand::default()
-                    .execute(&mut printer, &config)
-                    .await
+                let mut cmd = EnvelopeListCommand::default();
+                cmd.account.name = cli.account;
+                cmd.execute(&mut printer, &config).await
             }
         }
     };

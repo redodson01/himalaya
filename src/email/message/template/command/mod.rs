@@ -43,6 +43,16 @@ pub enum TemplateSubcommand {
 }
 
 impl TemplateSubcommand {
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::Write(cmd) => cmd.account.name = Some(name),
+            Self::Reply(cmd) => cmd.account.name = Some(name),
+            Self::Forward(cmd) => cmd.account.name = Some(name),
+            Self::Save(cmd) => cmd.account.name = Some(name),
+            Self::Send(cmd) => cmd.account.name = Some(name),
+        }
+    }
+
     pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         match self {
             Self::Write(cmd) => cmd.execute(printer, config).await,

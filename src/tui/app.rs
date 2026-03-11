@@ -79,9 +79,56 @@ impl From<&Envelope> for EnvelopeData {
     }
 }
 
+pub struct FolderEntry {
+    pub name: String,
+    pub account: String,
+}
+
+pub struct FolderSection {
+    pub name: String,
+    pub start: usize,
+    pub count: usize,
+}
+
+pub struct FolderListState {
+    pub folders: Vec<FolderEntry>,
+    pub sections: Vec<FolderSection>,
+    pub selected: usize,
+    pub saved_envelope_selected: usize,
+}
+
+pub struct FolderEnvelopeState {
+    pub envelopes: Vec<EnvelopeData>,
+    pub selected: usize,
+    pub folder_name: String,
+    pub account_key: String,
+    pub parent: FolderListState,
+}
+
+impl FolderEnvelopeState {
+    pub fn remove_envelope(&mut self, index: usize) -> Option<EnvelopeData> {
+        if index >= self.envelopes.len() {
+            return None;
+        }
+        let removed = self.envelopes.remove(index);
+        if !self.envelopes.is_empty() {
+            self.selected = self.selected.min(self.envelopes.len() - 1);
+        } else {
+            self.selected = 0;
+        }
+        Some(removed)
+    }
+}
+
 pub enum View {
     EnvelopeList,
-    MessageRead { content: String, scroll: u16 },
+    MessageRead {
+        content: String,
+        scroll: u16,
+        folder_context: Option<Box<FolderEnvelopeState>>,
+    },
+    FolderList(FolderListState),
+    FolderEnvelopeList(FolderEnvelopeState),
 }
 
 pub enum Status {
@@ -125,6 +172,20 @@ impl App {
 
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn folder_select_next(&mut self) {
+        if let View::FolderList(state) = &mut self.view {
+            if !state.folders.is_empty() {
+                state.selected = (state.selected + 1).min(state.folders.len() - 1);
+            }
+        }
+    }
+
+    pub fn folder_select_prev(&mut self) {
+        if let View::FolderList(state) = &mut self.view {
+            state.selected = state.selected.saturating_sub(1);
+        }
     }
 
     /// Remove the envelope at the given index, updating sections accordingly.
@@ -416,6 +477,133 @@ mod tests {
         assert_eq!(app.sections.len(), 1);
         assert_eq!(app.sections[0].name, "personal");
         assert_eq!(app.sections[0].start, 0);
+    }
+
+    fn make_folder_list_view(count: usize, selected: usize) -> View {
+        let folders = (0..count)
+            .map(|i| FolderEntry {
+                name: format!("folder{i}"),
+                account: String::new(),
+            })
+            .collect();
+        View::FolderList(FolderListState {
+            folders,
+            sections: Vec::new(),
+            selected,
+            saved_envelope_selected: 0,
+        })
+    }
+
+    #[test]
+    fn folder_select_next_advances() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_folder_list_view(3, 0);
+        app.folder_select_next();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_next_clamps_at_end() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_folder_list_view(2, 1);
+        app.folder_select_next();
+        app.folder_select_next();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_next_empty_list() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_folder_list_view(0, 0);
+        app.folder_select_next();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_prev_decrements() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_folder_list_view(3, 2);
+        app.folder_select_prev();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_prev_clamps_at_zero() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_folder_list_view(3, 0);
+        app.folder_select_prev();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_noop_on_wrong_view() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.folder_select_next();
+        assert!(matches!(app.view, View::EnvelopeList));
+        app.folder_select_prev();
+        assert!(matches!(app.view, View::EnvelopeList));
+    }
+
+    #[test]
+    fn folder_envelope_remove_basic() {
+        let mut state = FolderEnvelopeState {
+            envelopes: vec![
+                make_envelope("1", "a"),
+                make_envelope("2", "b"),
+                make_envelope("3", "c"),
+            ],
+            selected: 1,
+            folder_name: "Sent".to_string(),
+            account_key: String::new(),
+            parent: FolderListState {
+                folders: Vec::new(),
+                sections: Vec::new(),
+                selected: 0,
+                saved_envelope_selected: 0,
+            },
+        };
+        let removed = state.remove_envelope(1);
+        assert_eq!(removed.unwrap().id, "2");
+        assert_eq!(state.envelopes.len(), 2);
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn folder_envelope_remove_clamps_selected() {
+        let mut state = FolderEnvelopeState {
+            envelopes: vec![make_envelope("1", "a"), make_envelope("2", "b")],
+            selected: 1,
+            folder_name: "Sent".to_string(),
+            account_key: String::new(),
+            parent: FolderListState {
+                folders: Vec::new(),
+                sections: Vec::new(),
+                selected: 0,
+                saved_envelope_selected: 0,
+            },
+        };
+        state.remove_envelope(1);
+        assert_eq!(state.selected, 0);
     }
 
     #[test]

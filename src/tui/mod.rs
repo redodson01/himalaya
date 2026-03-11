@@ -231,6 +231,66 @@ fn account_key_for(app: &App, default_account: &str) -> String {
         .unwrap_or_else(|| default_account.to_string())
 }
 
+/// Envelope identity and context needed by most action handlers.
+struct EnvelopeContext {
+    id: String,
+    unseen: bool,
+    flagged: bool,
+    account_key: String,
+    folder: String,
+}
+
+/// Extract info about the active envelope, regardless of whether we're in the
+/// main list, a folder envelope list, or reading a message.
+fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeContext> {
+    match &app.view {
+        View::FolderEnvelopeList(state) => {
+            state
+                .envelopes
+                .get(state.selected)
+                .map(|env| EnvelopeContext {
+                    id: env.id.clone(),
+                    unseen: env.unseen,
+                    flagged: env.flagged,
+                    account_key: state.account_key.clone(),
+                    folder: state.folder_name.clone(),
+                })
+        }
+        View::MessageRead {
+            folder_context: Some(ctx),
+            ..
+        } => ctx.envelopes.get(ctx.selected).map(|env| EnvelopeContext {
+            id: env.id.clone(),
+            unseen: env.unseen,
+            flagged: env.flagged,
+            account_key: ctx.account_key.clone(),
+            folder: ctx.folder_name.clone(),
+        }),
+        _ => app.envelopes.get(app.selected).map(|env| {
+            let account_key = account_key_for(app, default_account);
+            EnvelopeContext {
+                id: env.id.clone(),
+                unseen: env.unseen,
+                flagged: env.flagged,
+                account_key,
+                folder: app.folder.clone(),
+            }
+        }),
+    }
+}
+
+/// Get a mutable reference to the active envelope in the current context.
+fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
+    match &mut app.view {
+        View::FolderEnvelopeList(state) => state.envelopes.get_mut(state.selected),
+        View::MessageRead {
+            folder_context: Some(ctx),
+            ..
+        } => ctx.envelopes.get_mut(ctx.selected),
+        _ => app.envelopes.get_mut(app.selected),
+    }
+}
+
 async fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -242,8 +302,8 @@ async fn run_event_loop(
 
         let action = handle_event(&app.view)?;
 
-        // Clear error status on any keypress
-        if !matches!(action, Action::None) && matches!(app.status, Some(Status::Error(_))) {
+        // Clear transient status on any keypress
+        if !matches!(action, Action::None) && app.status.is_some() {
             app.status = None;
         }
 
@@ -280,70 +340,42 @@ async fn run_event_loop(
                 }
             }
             Action::ReadMessage | Action::NextMessage => {
-                // Extract the active envelope info based on context
-                let env_info = if in_folder_context {
-                    // Folder context: get envelope from folder state
-                    match &mut app.view {
-                        View::FolderEnvelopeList(state) => {
-                            state.envelopes.get(state.selected).map(|env| {
-                                (
-                                    env.id.clone(),
-                                    env.unseen,
-                                    state.account_key.clone(),
-                                    state.folder_name.clone(),
-                                )
-                            })
-                        }
+                // Advance selection for NextMessage, with "no more" feedback
+                if matches!(action, Action::NextMessage) {
+                    let advanced = match &mut app.view {
                         View::MessageRead {
                             folder_context: Some(ctx),
                             ..
+                        } if !ctx.envelopes.is_empty() => {
+                            let prev = ctx.selected;
+                            ctx.selected = (ctx.selected + 1).min(ctx.envelopes.len() - 1);
+                            ctx.selected != prev
+                        }
+                        View::MessageRead {
+                            folder_context: None,
+                            ..
                         } => {
-                            if matches!(action, Action::NextMessage) && !ctx.envelopes.is_empty() {
-                                let prev = ctx.selected;
-                                ctx.selected = (ctx.selected + 1).min(ctx.envelopes.len() - 1);
-                                if ctx.selected == prev {
-                                    app.status =
-                                        Some(Status::Working("No more messages".to_string()));
-                                    continue;
-                                }
-                            }
-                            ctx.envelopes.get(ctx.selected).map(|env| {
-                                (
-                                    env.id.clone(),
-                                    env.unseen,
-                                    ctx.account_key.clone(),
-                                    ctx.folder_name.clone(),
-                                )
-                            })
+                            let prev = app.selected;
+                            app.select_next();
+                            app.selected != prev
                         }
-                        _ => None,
+                        _ => false,
+                    };
+                    if !advanced {
+                        app.status = Some(Status::Working("No more messages".to_string()));
+                        continue;
                     }
-                } else {
-                    // Main context
-                    if matches!(action, Action::NextMessage) {
-                        let prev = app.selected;
-                        app.select_next();
-                        if app.selected == prev {
-                            app.status = Some(Status::Working("No more messages".to_string()));
-                            continue;
-                        }
-                    }
-                    app.envelopes.get(app.selected).map(|env| {
-                        let account_key = account_key_for(app, default_account);
-                        let folder = app.folder.clone();
-                        (env.id.clone(), env.unseen, account_key, folder)
-                    })
-                };
+                }
 
-                if let Some((id_str, was_unseen, account_key, folder)) = env_info {
+                if let Some(ctx) = active_envelope_context(app, default_account) {
                     app.status = Some(Status::Working("Loading…".to_string()));
                     terminal.draw(|frame| ui::render(frame, app))?;
 
                     let content = if let Some((backend, account_config, _, _)) =
-                        backends.get(&account_key)
+                        backends.get(&ctx.account_key)
                     {
-                        match id_str.parse::<usize>() {
-                            Ok(id) => match backend.get_messages(&folder, &[id]).await {
+                        match ctx.id.parse::<usize>() {
+                            Ok(id) => match backend.get_messages(&ctx.folder, &[id]).await {
                                 Ok(emails) => {
                                     let mut body = String::new();
                                     for email in emails.to_vec() {
@@ -357,32 +389,15 @@ async fn run_event_loop(
                                 }
                                 Err(e) => format!("Error fetching message: {e}"),
                             },
-                            Err(_) => format!("Invalid envelope ID: {id_str}"),
+                            Err(_) => format!("Invalid envelope ID: {}", ctx.id),
                         }
                     } else {
-                        format!("No backend for account: {account_key}")
+                        format!("No backend for account: {}", ctx.account_key)
                     };
 
                     // Mark as seen locally
-                    if was_unseen {
-                        if in_folder_context {
-                            let env = match &mut app.view {
-                                View::FolderEnvelopeList(state) => {
-                                    state.envelopes.get_mut(state.selected)
-                                }
-                                View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } => ctx.envelopes.get_mut(ctx.selected),
-                                _ => None,
-                            };
-                            if let Some(env) = env {
-                                env.unseen = false;
-                                if !env.flags.contains('S') {
-                                    env.flags = sort_flags(&format!("S{}", env.flags));
-                                }
-                            }
-                        } else if let Some(env) = app.envelopes.get_mut(app.selected) {
+                    if ctx.unseen {
+                        if let Some(env) = active_envelope_mut(app) {
                             env.unseen = false;
                             if !env.flags.contains('S') {
                                 env.flags = sort_flags(&format!("S{}", env.flags));
@@ -418,11 +433,11 @@ async fn run_event_loop(
                     terminal.draw(|frame| ui::render(frame, app))?;
 
                     // Mark as read on server in background
-                    if was_unseen {
-                        if let Some((backend, _, _, _)) = backends.get(&account_key) {
-                            if let Ok(id) = id_str.parse::<usize>() {
+                    if ctx.unseen {
+                        if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                            if let Ok(id) = ctx.id.parse::<usize>() {
                                 let seen = Flags::from_iter([Flag::Seen]);
-                                let _ = backend.add_flags(&folder, &[id], &seen).await;
+                                let _ = backend.add_flags(&ctx.folder, &[id], &seen).await;
                             }
                         }
                     }
@@ -450,38 +465,8 @@ async fn run_event_loop(
                 }
             }
             Action::DeleteMessage => {
-                // Extract envelope info from the right context
-                let env_info = if in_folder_context {
-                    match &app.view {
-                        View::FolderEnvelopeList(state) => {
-                            state.envelopes.get(state.selected).map(|env| {
-                                (
-                                    env.id.clone(),
-                                    state.account_key.clone(),
-                                    state.folder_name.clone(),
-                                )
-                            })
-                        }
-                        View::MessageRead {
-                            folder_context: Some(ctx),
-                            ..
-                        } => ctx.envelopes.get(ctx.selected).map(|env| {
-                            (
-                                env.id.clone(),
-                                ctx.account_key.clone(),
-                                ctx.folder_name.clone(),
-                            )
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    app.envelopes.get(app.selected).map(|env| {
-                        let account_key = account_key_for(app, default_account);
-                        (env.id.clone(), account_key, app.folder.clone())
-                    })
-                };
-
-                if let Some((id_str, account_key, folder)) = env_info {
+                if let Some(ctx) = active_envelope_context(app, default_account) {
+                    let (id_str, account_key, folder) = (ctx.id, ctx.account_key, ctx.folder);
                     app.status = Some(Status::Working("Deleting…".to_string()));
                     terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -519,40 +504,8 @@ async fn run_event_loop(
                 }
             }
             Action::ToggleRead => {
-                let env_info = if in_folder_context {
-                    match &app.view {
-                        View::FolderEnvelopeList(state) => {
-                            state.envelopes.get(state.selected).map(|env| {
-                                (
-                                    env.id.clone(),
-                                    env.unseen,
-                                    state.account_key.clone(),
-                                    state.folder_name.clone(),
-                                )
-                            })
-                        }
-                        View::MessageRead {
-                            folder_context: Some(ctx),
-                            ..
-                        } => ctx.envelopes.get(ctx.selected).map(|env| {
-                            (
-                                env.id.clone(),
-                                env.unseen,
-                                ctx.account_key.clone(),
-                                ctx.folder_name.clone(),
-                            )
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    app.envelopes.get(app.selected).map(|env| {
-                        let account_key = account_key_for(app, default_account);
-                        (env.id.clone(), env.unseen, account_key, app.folder.clone())
-                    })
-                };
-
-                if let Some((id_str, is_unseen, account_key, folder)) = env_info {
-                    let label = if is_unseen {
+                if let Some(ctx) = active_envelope_context(app, default_account) {
+                    let label = if ctx.unseen {
                         "Marking read…"
                     } else {
                         "Marking unread…"
@@ -561,33 +514,18 @@ async fn run_event_loop(
                     terminal.draw(|frame| ui::render(frame, app))?;
 
                     let mut error: Option<String> = None;
-                    if let Some((backend, _, _, _)) = backends.get(&account_key) {
-                        if let Ok(id) = id_str.parse::<usize>() {
+                    if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                        if let Ok(id) = ctx.id.parse::<usize>() {
                             let seen = Flags::from_iter([Flag::Seen]);
-                            let result = if is_unseen {
-                                backend.add_flags(&folder, &[id], &seen).await
+                            let result = if ctx.unseen {
+                                backend.add_flags(&ctx.folder, &[id], &seen).await
                             } else {
-                                backend.remove_flags(&folder, &[id], &seen).await
+                                backend.remove_flags(&ctx.folder, &[id], &seen).await
                             };
                             match result {
                                 Ok(_) => {
-                                    // Update envelope in the right context
-                                    let env = if in_folder_context {
-                                        match &mut app.view {
-                                            View::FolderEnvelopeList(state) => {
-                                                state.envelopes.get_mut(state.selected)
-                                            }
-                                            View::MessageRead {
-                                                folder_context: Some(ctx),
-                                                ..
-                                            } => ctx.envelopes.get_mut(ctx.selected),
-                                            _ => None,
-                                        }
-                                    } else {
-                                        app.envelopes.get_mut(app.selected)
-                                    };
-                                    if let Some(env) = env {
-                                        if is_unseen {
+                                    if let Some(env) = active_envelope_mut(app) {
+                                        if ctx.unseen {
                                             env.unseen = false;
                                             if !env.flags.contains('S') {
                                                 env.flags = sort_flags(&format!("S{}", env.flags));
@@ -611,40 +549,8 @@ async fn run_event_loop(
                 }
             }
             Action::ToggleFlag => {
-                let env_info = if in_folder_context {
-                    match &app.view {
-                        View::FolderEnvelopeList(state) => {
-                            state.envelopes.get(state.selected).map(|env| {
-                                (
-                                    env.id.clone(),
-                                    env.flagged,
-                                    state.account_key.clone(),
-                                    state.folder_name.clone(),
-                                )
-                            })
-                        }
-                        View::MessageRead {
-                            folder_context: Some(ctx),
-                            ..
-                        } => ctx.envelopes.get(ctx.selected).map(|env| {
-                            (
-                                env.id.clone(),
-                                env.flagged,
-                                ctx.account_key.clone(),
-                                ctx.folder_name.clone(),
-                            )
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    app.envelopes.get(app.selected).map(|env| {
-                        let account_key = account_key_for(app, default_account);
-                        (env.id.clone(), env.flagged, account_key, app.folder.clone())
-                    })
-                };
-
-                if let Some((id_str, is_flagged, account_key, folder)) = env_info {
-                    let label = if is_flagged {
+                if let Some(ctx) = active_envelope_context(app, default_account) {
+                    let label = if ctx.flagged {
                         "Unflagging…"
                     } else {
                         "Flagging…"
@@ -653,33 +559,19 @@ async fn run_event_loop(
                     terminal.draw(|frame| ui::render(frame, app))?;
 
                     let mut error: Option<String> = None;
-                    if let Some((backend, _, _, _)) = backends.get(&account_key) {
-                        if let Ok(id) = id_str.parse::<usize>() {
+                    if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                        if let Ok(id) = ctx.id.parse::<usize>() {
                             let flagged = Flags::from_iter([Flag::Flagged]);
-                            let result = if is_flagged {
-                                backend.remove_flags(&folder, &[id], &flagged).await
+                            let result = if ctx.flagged {
+                                backend.remove_flags(&ctx.folder, &[id], &flagged).await
                             } else {
-                                backend.add_flags(&folder, &[id], &flagged).await
+                                backend.add_flags(&ctx.folder, &[id], &flagged).await
                             };
                             match result {
                                 Ok(_) => {
-                                    let env = if in_folder_context {
-                                        match &mut app.view {
-                                            View::FolderEnvelopeList(state) => {
-                                                state.envelopes.get_mut(state.selected)
-                                            }
-                                            View::MessageRead {
-                                                folder_context: Some(ctx),
-                                                ..
-                                            } => ctx.envelopes.get_mut(ctx.selected),
-                                            _ => None,
-                                        }
-                                    } else {
-                                        app.envelopes.get_mut(app.selected)
-                                    };
-                                    if let Some(env) = env {
-                                        env.flagged = !is_flagged;
-                                        if is_flagged {
+                                    if let Some(env) = active_envelope_mut(app) {
+                                        env.flagged = !ctx.flagged;
+                                        if ctx.flagged {
                                             env.flags = env.flags.replace('F', "");
                                         } else if !env.flags.contains('F') {
                                             env.flags = sort_flags(&format!("F{}", env.flags));
@@ -853,37 +745,9 @@ async fn run_event_loop(
                 }
             }
             Action::ArchiveMessage => {
-                let env_info = if in_folder_context {
-                    match &app.view {
-                        View::FolderEnvelopeList(state) => {
-                            state.envelopes.get(state.selected).map(|env| {
-                                (
-                                    env.id.clone(),
-                                    state.account_key.clone(),
-                                    state.folder_name.clone(),
-                                )
-                            })
-                        }
-                        View::MessageRead {
-                            folder_context: Some(ctx),
-                            ..
-                        } => ctx.envelopes.get(ctx.selected).map(|env| {
-                            (
-                                env.id.clone(),
-                                ctx.account_key.clone(),
-                                ctx.folder_name.clone(),
-                            )
-                        }),
-                        _ => None,
-                    }
-                } else {
-                    app.envelopes.get(app.selected).map(|env| {
-                        let account_key = account_key_for(app, default_account);
-                        (env.id.clone(), account_key, app.folder.clone())
-                    })
-                };
-
-                if let Some((id_str, account_key, source_folder)) = env_info {
+                if let Some(ctx) = active_envelope_context(app, default_account) {
+                    let (id_str, account_key, source_folder) =
+                        (ctx.id, ctx.account_key, ctx.folder);
                     app.status = Some(Status::Working("Archiving…".to_string()));
                     terminal.draw(|frame| ui::render(frame, app))?;
 

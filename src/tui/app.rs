@@ -607,6 +607,42 @@ mod tests {
     }
 
     #[test]
+    fn folder_envelope_remove_only_item() {
+        let mut state = FolderEnvelopeState {
+            envelopes: vec![make_envelope("1", "a")],
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: String::new(),
+            parent: FolderListState {
+                folders: Vec::new(),
+                sections: Vec::new(),
+                selected: 0,
+                saved_envelope_selected: 0,
+            },
+        };
+        state.remove_envelope(0);
+        assert!(state.envelopes.is_empty());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn folder_envelope_remove_out_of_bounds() {
+        let mut state = FolderEnvelopeState {
+            envelopes: vec![],
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: String::new(),
+            parent: FolderListState {
+                folders: Vec::new(),
+                sections: Vec::new(),
+                selected: 0,
+                saved_envelope_selected: 0,
+            },
+        };
+        assert!(state.remove_envelope(0).is_none());
+    }
+
+    #[test]
     fn sort_flags_sfadt_order() {
         assert_eq!(sort_flags("FS"), "SF");
         assert_eq!(sort_flags("DATSF"), "SFADT");

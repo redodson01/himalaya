@@ -540,6 +540,29 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `g` | Open folder list |
+
+### Folder list
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `b` | Back to envelope list |
+| `j` / `Down` | Select next folder |
+| `k` / `Up` | Select previous folder |
+| `Enter` | Open selected folder |
+
+### Folder envelope list
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `b` | Back to folder list |
+| `j` / `Down` | Select next envelope |
+| `k` / `Up` | Select previous envelope |
+| `Enter` | Read selected message |
+| `r` | Toggle read/unread |
+| `f` | Toggle flagged |
+| `d` | Delete message |
+| `a` | Archive message |
 
 ### Message view
 

@@ -6,19 +6,120 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{App, EnvelopeData, Status, View};
+use crate::tui::app::{
+    App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection, Status, View,
+};
 
 const FROM_COLOR: Color = Color::Cyan;
 const FLAGGED_COLOR: Color = Color::Yellow;
 const HEADER_COLOR: Color = Color::Cyan;
 const SECTION_HEADER_COLOR: Color = Color::LightRed;
 
+/// Column widths shared by all envelope tables (main list and folder envelope list).
+const ENVELOPE_WIDTHS: [Constraint; 11] = [
+    Constraint::Length(1),
+    Constraint::Length(6),
+    Constraint::Length(1),
+    Constraint::Length(1),
+    Constraint::Percentage(25),
+    Constraint::Length(1),
+    Constraint::Length(1),
+    Constraint::Percentage(50),
+    Constraint::Length(1),
+    Constraint::Length(1),
+    Constraint::Length(16),
+];
+
+/// Build a table header row for envelope lists.
+fn envelope_header() -> Row<'static> {
+    Row::new([
+        Cell::from(" "),
+        Cell::from("FLAGS"),
+        Cell::from(" "),
+        Cell::from(" "),
+        Cell::from("FROM"),
+        Cell::from(" "),
+        Cell::from(" "),
+        Cell::from("SUBJECT"),
+        Cell::from(" "),
+        Cell::from(" "),
+        Cell::from("DATE"),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .bottom_margin(1)
+}
+
+/// Build a single styled table row for an envelope.
+fn envelope_row(e: &EnvelopeData, is_selected: bool) -> Row<'_> {
+    let highlight = if is_selected {
+        Modifier::REVERSED
+    } else {
+        Modifier::empty()
+    };
+
+    let base_modifier = if e.unseen {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    };
+
+    let dim = if e.unseen {
+        Modifier::empty()
+    } else {
+        Modifier::DIM
+    };
+
+    let flag_style = if e.flagged {
+        Style::default()
+            .fg(FLAGGED_COLOR)
+            .add_modifier(base_modifier | highlight)
+    } else {
+        Style::default().add_modifier(dim | base_modifier | highlight)
+    };
+
+    let from_style = if e.unseen {
+        Style::default().add_modifier(Modifier::BOLD | highlight)
+    } else {
+        Style::default().fg(FROM_COLOR).add_modifier(highlight)
+    };
+
+    let from_combined = from_style.add_modifier(base_modifier);
+    let subject_style = Style::default().add_modifier(base_modifier | highlight);
+    let date_style = Style::default().add_modifier(dim | base_modifier | highlight);
+
+    Row::new([
+        Cell::from(" ").style(flag_style),
+        Cell::from(e.flags.as_str()).style(flag_style),
+        Cell::from(" ").style(flag_style),
+        Cell::from(" ").style(from_combined),
+        Cell::from(e.from.as_str()).style(from_combined),
+        Cell::from(" ").style(from_combined),
+        Cell::from(" ").style(subject_style),
+        Cell::from(e.subject.as_str()).style(subject_style),
+        Cell::from(" ").style(subject_style),
+        Cell::from(" ").style(date_style),
+        Cell::from(e.date.as_str()).style(date_style),
+    ])
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
     match &app.view {
         View::EnvelopeList => render_envelope_list(frame, app),
         View::MessageRead {
-            content, scroll, ..
-        } => render_message(frame, content, *scroll, app),
+            content,
+            scroll,
+            folder_context,
+        } => {
+            let active_env = match folder_context {
+                Some(ctx) => ctx.envelopes.get(ctx.selected),
+                None => app.envelopes.get(app.selected),
+            };
+            render_message(frame, content, *scroll, app, active_env)
+        }
+        View::FolderList(state) => {
+            render_folder_list(frame, &state.folders, &state.sections, state.selected, app)
+        }
+        View::FolderEnvelopeList(state) => render_folder_envelope_list(frame, state, app),
     }
 }
 
@@ -35,7 +136,7 @@ fn toggle_labels(env: Option<&EnvelopeData>) -> (&'static str, &'static str) {
             if env.flagged { ": unflag" } else { ": flag" },
         )
     } else {
-        (": mark read/unread | ", ": flag")
+        (": mark read/unread | ", ": flag/unflag")
     }
 }
 
@@ -63,23 +164,6 @@ fn render_flag_legend(frame: &mut Frame, area: ratatui::layout::Rect) {
 
 fn render_envelope_list(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
-
-    let header_style = Style::default().add_modifier(Modifier::BOLD);
-    let header = Row::new([
-        Cell::from(" "),
-        Cell::from("FLAGS"),
-        Cell::from(" "),
-        Cell::from(" "),
-        Cell::from("FROM"),
-        Cell::from(" "),
-        Cell::from(" "),
-        Cell::from("SUBJECT"),
-        Cell::from(" "),
-        Cell::from(" "),
-        Cell::from("DATE"),
-    ])
-    .style(header_style)
-    .bottom_margin(1);
 
     // Build a set of envelope indices that start a new account section,
     // tracking whether each is the first section (to skip the blank separator).
@@ -117,82 +201,17 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         }
 
         envelope_to_table_row.push(rows.len());
-
-        let is_selected = app.selected == i;
-        let highlight = if is_selected {
-            Modifier::REVERSED
-        } else {
-            Modifier::empty()
-        };
-
-        let base_modifier = if e.unseen {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        };
-
-        let dim = if e.unseen {
-            Modifier::empty()
-        } else {
-            Modifier::DIM
-        };
-
-        let flag_style = if e.flagged {
-            Style::default()
-                .fg(FLAGGED_COLOR)
-                .add_modifier(base_modifier | highlight)
-        } else {
-            Style::default().add_modifier(dim | base_modifier | highlight)
-        };
-
-        let from_style = if e.unseen {
-            Style::default().add_modifier(Modifier::BOLD | highlight)
-        } else {
-            Style::default().fg(FROM_COLOR).add_modifier(highlight)
-        };
-
-        let from_combined = from_style.add_modifier(base_modifier);
-        let subject_style = Style::default().add_modifier(base_modifier | highlight);
-        let date_style = Style::default().add_modifier(dim | base_modifier | highlight);
-
-        rows.push(Row::new([
-            Cell::from(" ").style(flag_style),
-            Cell::from(e.flags.as_str()).style(flag_style),
-            Cell::from(" ").style(flag_style),
-            Cell::from(" ").style(from_combined),
-            Cell::from(e.from.as_str()).style(from_combined),
-            Cell::from(" ").style(from_combined),
-            Cell::from(" ").style(subject_style),
-            Cell::from(e.subject.as_str()).style(subject_style),
-            Cell::from(" ").style(subject_style),
-            Cell::from(" ").style(date_style),
-            Cell::from(e.date.as_str()).style(date_style),
-        ]));
+        rows.push(envelope_row(e, app.selected == i));
     }
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(1),
-            Constraint::Length(6),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Percentage(25),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Percentage(50),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(16),
-        ],
-    )
-    .column_spacing(0)
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} ", app.folder)),
-    );
+    let table = Table::new(rows, ENVELOPE_WIDTHS)
+        .column_spacing(0)
+        .header(envelope_header())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", app.folder)),
+        );
 
     // Map the envelope selection index to the correct table row
     let table_selected = envelope_to_table_row
@@ -232,6 +251,135 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             Span::styled("d", Style::default().fg(Color::Yellow)),
             Span::raw(": delete | "),
             Span::styled("a", Style::default().fg(Color::Yellow)),
+            Span::raw(": archive | "),
+            Span::styled("g", Style::default().fg(Color::Yellow)),
+            Span::raw(": folders"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
+    render_flag_legend(frame, chunks_bottom[1]);
+}
+
+fn render_folder_list(
+    frame: &mut Frame,
+    folders: &[FolderEntry],
+    sections: &[FolderSection],
+    selected: usize,
+    app: &App,
+) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+
+    let section_starts: std::collections::HashMap<usize, &str> = sections
+        .iter()
+        .filter(|s| s.count > 0)
+        .map(|s| (s.start, s.name.as_str()))
+        .collect();
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut folder_to_table_row: Vec<usize> = Vec::new();
+
+    for (i, f) in folders.iter().enumerate() {
+        if let Some(account_name) = section_starts.get(&i) {
+            rows.push(Row::new([Cell::from("")]));
+            let style = Style::default()
+                .fg(SECTION_HEADER_COLOR)
+                .add_modifier(Modifier::BOLD);
+            rows.push(Row::new([
+                Cell::from(format!("  {account_name}")).style(style)
+            ]));
+        }
+
+        folder_to_table_row.push(rows.len());
+        rows.push(Row::new([Cell::from(format!("  {}", f.name))]));
+    }
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .column_spacing(0)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Folder "),
+        );
+
+    let table_selected = folder_to_table_row.get(selected).copied().unwrap_or(0);
+    let mut state = TableState::default().with_selected(Some(table_selected));
+    frame.render_stateful_widget(table, chunks[0], &mut state);
+
+    let status_line = if let Some(status) = &app.status {
+        let (msg, color) = match status {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
+            Span::raw(": back | "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": navigate | "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": select folder"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(status_line), chunks[1]);
+}
+
+fn render_folder_envelope_list(frame: &mut Frame, state: &FolderEnvelopeState, app: &App) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+
+    let rows: Vec<Row> = state
+        .envelopes
+        .iter()
+        .enumerate()
+        .map(|(i, e)| envelope_row(e, state.selected == i))
+        .collect();
+
+    let table = Table::new(rows, ENVELOPE_WIDTHS)
+        .column_spacing(0)
+        .header(envelope_header())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", state.folder_name)),
+        );
+
+    let mut table_state = TableState::default().with_selected(Some(state.selected));
+    frame.render_stateful_widget(table, chunks[0], &mut table_state);
+
+    let chunks_bottom =
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(chunks[1]);
+
+    let status_line = if let Some(status) = &app.status {
+        let (msg, color) = match status {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        let (read_label, flag_label) = toggle_labels(state.envelopes.get(state.selected));
+        Line::from(vec![
+            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
+            Span::raw(": back | "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": navigate | "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": read | "),
+            Span::styled("r", Style::default().fg(Color::Yellow)),
+            Span::raw(read_label),
+            Span::styled("f", Style::default().fg(Color::Yellow)),
+            Span::raw(flag_label),
+            Span::raw(" | "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(": delete | "),
+            Span::styled("a", Style::default().fg(Color::Yellow)),
             Span::raw(": archive"),
         ])
     };
@@ -239,7 +387,13 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     render_flag_legend(frame, chunks_bottom[1]);
 }
 
-fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
+fn render_message(
+    frame: &mut Frame,
+    content: &str,
+    scroll: u16,
+    app: &App,
+    active_env: Option<&EnvelopeData>,
+) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
     // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
@@ -271,7 +425,7 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
         })
         .collect();
 
-    let title = if let Some(env) = app.envelopes.get(app.selected) {
+    let title = if let Some(env) = active_env {
         if env.flags.is_empty() {
             " Message ".to_string()
         } else {
@@ -302,7 +456,7 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16, app: &App) {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ))
     } else {
-        let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
+        let (read_label, flag_label) = toggle_labels(active_env);
         Line::from(vec![
             Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
             Span::raw(": back | "),

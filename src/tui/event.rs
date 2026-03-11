@@ -17,6 +17,12 @@ pub enum Action {
     ToggleRead,
     NextMessage,
     ToggleFlag,
+    OpenFolderList,
+    SelectFolder,
+    FolderSelectNext,
+    FolderSelectPrev,
+    BackFromFolders,
+    BackFromFolderEnvelopes,
 }
 
 pub fn handle_event(view: &View) -> color_eyre::Result<Action> {
@@ -41,6 +47,25 @@ fn action_for_key(view: &View, key: KeyCode) -> Action {
     match view {
         View::EnvelopeList => match key {
             KeyCode::Esc | KeyCode::Char('q') => Action::Quit,
+            KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
+            KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
+            KeyCode::Enter => Action::ReadMessage,
+            KeyCode::Char('d') => Action::DeleteMessage,
+            KeyCode::Char('a') => Action::ArchiveMessage,
+            KeyCode::Char('r') => Action::ToggleRead,
+            KeyCode::Char('f') => Action::ToggleFlag,
+            KeyCode::Char('g') => Action::OpenFolderList,
+            _ => Action::None,
+        },
+        View::FolderList(_) => match key {
+            KeyCode::Esc | KeyCode::Char('b') => Action::BackFromFolders,
+            KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
+            KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
+            KeyCode::Enter => Action::SelectFolder,
+            _ => Action::None,
+        },
+        View::FolderEnvelopeList(_) => match key {
+            KeyCode::Esc | KeyCode::Char('b') => Action::BackFromFolderEnvelopes,
             KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
             KeyCode::Enter => Action::ReadMessage,
@@ -76,6 +101,7 @@ mod tests {
         View::MessageRead {
             content: String::new(),
             scroll: 0,
+            folder_context: None,
         }
     }
 
@@ -154,6 +180,150 @@ mod tests {
     fn list_unknown_key_is_none() {
         assert_eq!(
             action_for_key(&list_view(), KeyCode::Char('z')),
+            Action::None
+        );
+    }
+
+    // --- Envelope list: g opens folders ---
+
+    #[test]
+    fn list_g_opens_folders() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('g')),
+            Action::OpenFolderList
+        );
+    }
+
+    // --- Folder list view ---
+
+    fn folder_view() -> View {
+        use crate::tui::app::FolderListState;
+        View::FolderList(FolderListState {
+            folders: Vec::new(),
+            sections: Vec::new(),
+            selected: 0,
+            saved_envelope_selected: 0,
+        })
+    }
+
+    #[test]
+    fn folder_j_selects_next() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Char('j')),
+            Action::FolderSelectNext
+        );
+    }
+
+    #[test]
+    fn folder_k_selects_prev() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Char('k')),
+            Action::FolderSelectPrev
+        );
+    }
+
+    #[test]
+    fn folder_enter_selects() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Enter),
+            Action::SelectFolder
+        );
+    }
+
+    #[test]
+    fn folder_esc_goes_back() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Esc),
+            Action::BackFromFolders
+        );
+    }
+
+    #[test]
+    fn folder_b_goes_back() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Char('b')),
+            Action::BackFromFolders
+        );
+    }
+
+    #[test]
+    fn folder_q_is_none() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Char('q')),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn folder_unknown_is_none() {
+        assert_eq!(
+            action_for_key(&folder_view(), KeyCode::Char('z')),
+            Action::None
+        );
+    }
+
+    // --- Folder envelope list view ---
+
+    fn folder_envelope_view() -> View {
+        use crate::tui::app::{FolderEnvelopeState, FolderListState};
+        View::FolderEnvelopeList(FolderEnvelopeState {
+            envelopes: Vec::new(),
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: String::new(),
+            parent: FolderListState {
+                folders: Vec::new(),
+                sections: Vec::new(),
+                selected: 0,
+                saved_envelope_selected: 0,
+            },
+        })
+    }
+
+    #[test]
+    fn folder_envelope_esc_goes_back() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Esc),
+            Action::BackFromFolderEnvelopes
+        );
+    }
+
+    #[test]
+    fn folder_envelope_b_goes_back() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('b')),
+            Action::BackFromFolderEnvelopes
+        );
+    }
+
+    #[test]
+    fn folder_envelope_j_selects_next() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('j')),
+            Action::SelectNext
+        );
+    }
+
+    #[test]
+    fn folder_envelope_enter_reads() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Enter),
+            Action::ReadMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_d_deletes() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('d')),
+            Action::DeleteMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_q_is_none() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('q')),
             Action::None
         );
     }

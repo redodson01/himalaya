@@ -20,7 +20,7 @@ use crate::config::TomlConfig;
 
 use self::app::{
     sort_flags, AccountSection, App, EnvelopeData, FolderEntry, FolderEnvelopeState,
-    FolderListState, FolderSection, Status, View,
+    FolderListState, FolderSection, MoveFolderPickerState, Status, View,
 };
 use self::event::{handle_event, Action};
 
@@ -697,8 +697,15 @@ async fn run_event_loop(
                 Action::BackFromFolders => {
                     if let View::FolderList(state) = &app.view {
                         app.selected = state.saved_envelope_selected;
+                        app.view = View::EnvelopeList;
+                    } else {
+                        let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                        if let View::MoveFolderPicker(picker) = old_view {
+                            if let Some(fe_state) = picker.folder_envelope_state {
+                                app.view = View::FolderEnvelopeList(*fe_state);
+                            }
+                        }
                     }
-                    app.view = View::EnvelopeList;
                 }
                 Action::BackFromFolderEnvelopes => {
                     let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
@@ -787,6 +794,7 @@ async fn run_event_loop(
                             Some(Action::ReadMessage)
                         }
                         View::FolderList(_) => Some(Action::SelectFolder),
+                        View::MoveFolderPicker(_) => Some(Action::ConfirmMove),
                         _ => None,
                     };
                     if app.confirm_search() {
@@ -844,6 +852,148 @@ async fn run_event_loop(
                             }
                         }
                         app.status = error.map(Status::Error);
+                    }
+                }
+                Action::MoveMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let (id_str, account_key, source_folder, env_index) = (
+                            ctx.id.clone(),
+                            ctx.account_key.clone(),
+                            ctx.folder.clone(),
+                            {
+                                match &app.view {
+                                    View::FolderEnvelopeList(state) => state.selected,
+                                    View::MessageRead {
+                                        folder_context: Some(fctx),
+                                        ..
+                                    } => fctx.selected,
+                                    _ => app.selected,
+                                }
+                            },
+                        );
+
+                        app.status = Some(Status::Working("Loading folders…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let mut folders = Vec::new();
+                        let mut error: Option<String> = None;
+
+                        if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                            match backend.list_folders().await {
+                                Ok(account_folders) => {
+                                    let account_folders: Vec<email::folder::Folder> =
+                                        account_folders.into();
+                                    for f in account_folders {
+                                        if f.name != source_folder {
+                                            folders.push(FolderEntry {
+                                                name: f.name,
+                                                account: account_key.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error = Some(format!("Error loading folders: {e}"));
+                                }
+                            }
+                        }
+
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        } else if folders.is_empty() {
+                            app.status =
+                                Some(Status::Error("No other folders available".to_string()));
+                        } else {
+                            app.status = None;
+                            // Extract FolderEnvelopeState if in folder context
+                            let fe_state = if in_folder_context {
+                                let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                                match old_view {
+                                    View::FolderEnvelopeList(s) => Some(Box::new(s)),
+                                    View::MessageRead {
+                                        folder_context: Some(ctx),
+                                        ..
+                                    } => Some(ctx),
+                                    _ => None,
+                                }
+                            } else {
+                                // If in MessageRead without folder context, go back to list
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::EnvelopeList;
+                                }
+                                None
+                            };
+
+                            app.view = View::MoveFolderPicker(MoveFolderPickerState {
+                                folders,
+                                selected: 0,
+                                source_envelope_id: id_str,
+                                source_envelope_index: env_index,
+                                source_folder,
+                                account_key,
+                                return_to_folder: in_folder_context,
+                                folder_envelope_state: fe_state,
+                            });
+                        }
+                    }
+                }
+                Action::ConfirmMove => {
+                    if let View::MoveFolderPicker(ref state) = app.view {
+                        if let Some(target) = state.folders.get(state.selected) {
+                            let target_name = target.name.clone();
+                            let source_folder = state.source_folder.clone();
+                            let id_str = state.source_envelope_id.clone();
+                            let account_key = state.account_key.clone();
+                            let return_to_folder = state.return_to_folder;
+
+                            app.status = Some(Status::Working(format!("Moving to {target_name}…")));
+                            terminal.draw(|frame| ui::render(frame, app))?;
+
+                            let mut error: Option<String> = None;
+                            if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                                if let Ok(id) = id_str.parse::<usize>() {
+                                    match backend
+                                        .move_messages(&source_folder, &target_name, &[id])
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            // Take the picker state
+                                            let old_view = std::mem::replace(
+                                                &mut app.view,
+                                                View::EnvelopeList,
+                                            );
+                                            if let View::MoveFolderPicker(picker) = old_view {
+                                                if return_to_folder {
+                                                    if let Some(mut fe_state) =
+                                                        picker.folder_envelope_state
+                                                    {
+                                                        fe_state.remove_envelope(
+                                                            picker.source_envelope_index,
+                                                        );
+                                                        app.view =
+                                                            View::FolderEnvelopeList(*fe_state);
+                                                    }
+                                                } else {
+                                                    app.remove_envelope(
+                                                        picker.source_envelope_index,
+                                                    );
+                                                    // already set to EnvelopeList
+                                                }
+                                            }
+                                            app.status = Some(Status::Working(format!(
+                                                "Moved to {target_name}"
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            error = Some(format!("Move failed: {e}"));
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(err) = error {
+                                app.status = Some(Status::Error(err));
+                            }
+                        }
                     }
                 }
             }

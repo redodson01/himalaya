@@ -128,6 +128,17 @@ impl FolderEnvelopeState {
     }
 }
 
+pub struct MoveFolderPickerState {
+    pub folders: Vec<FolderEntry>,
+    pub selected: usize,
+    pub source_envelope_id: String,
+    pub source_envelope_index: usize,
+    pub source_folder: String,
+    pub account_key: String,
+    pub return_to_folder: bool,
+    pub folder_envelope_state: Option<Box<FolderEnvelopeState>>,
+}
+
 pub enum View {
     EnvelopeList,
     MessageRead {
@@ -137,6 +148,7 @@ pub enum View {
     },
     FolderList(FolderListState),
     FolderEnvelopeList(FolderEnvelopeState),
+    MoveFolderPicker(MoveFolderPickerState),
 }
 
 pub enum Status {
@@ -185,16 +197,30 @@ impl App {
     }
 
     pub fn folder_select_next(&mut self) {
-        if let View::FolderList(state) = &mut self.view {
-            if !state.folders.is_empty() {
-                state.selected = (state.selected + 1).min(state.folders.len() - 1);
+        match &mut self.view {
+            View::FolderList(state) => {
+                if !state.folders.is_empty() {
+                    state.selected = (state.selected + 1).min(state.folders.len() - 1);
+                }
             }
+            View::MoveFolderPicker(state) => {
+                if !state.folders.is_empty() {
+                    state.selected = (state.selected + 1).min(state.folders.len() - 1);
+                }
+            }
+            _ => {}
         }
     }
 
     pub fn folder_select_prev(&mut self) {
-        if let View::FolderList(state) = &mut self.view {
-            state.selected = state.selected.saturating_sub(1);
+        match &mut self.view {
+            View::FolderList(state) => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            View::MoveFolderPicker(state) => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            _ => {}
         }
     }
 
@@ -239,6 +265,7 @@ impl App {
             View::EnvelopeList => self.envelopes.len(),
             View::FolderList(state) => state.folders.len(),
             View::FolderEnvelopeList(state) => state.envelopes.len(),
+            View::MoveFolderPicker(state) => state.folders.len(),
             View::MessageRead { .. } => return, // no-op
         };
         self.search = Some(SearchState {
@@ -268,6 +295,7 @@ impl App {
             View::EnvelopeList => self.selected = original_index,
             View::FolderList(state) => state.selected = original_index,
             View::FolderEnvelopeList(state) => state.selected = original_index,
+            View::MoveFolderPicker(state) => state.selected = original_index,
             View::MessageRead { .. } => {}
         }
         true
@@ -312,6 +340,7 @@ impl App {
                 View::EnvelopeList => self.envelopes.len(),
                 View::FolderList(state) => state.folders.len(),
                 View::FolderEnvelopeList(state) => state.envelopes.len(),
+                View::MoveFolderPicker(state) => state.folders.len(),
                 View::MessageRead { .. } => 0,
             };
             search.matched_indices = (0..len).collect();
@@ -341,6 +370,7 @@ impl App {
                 .iter()
                 .map(|e| format!("{} {}", e.subject, e.from))
                 .collect(),
+            View::MoveFolderPicker(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
             View::MessageRead { .. } => Vec::new(),
         };
 
@@ -918,5 +948,99 @@ mod tests {
         app.search_select_next();
         app.search_select_prev();
         app.confirm_search();
+    }
+
+    // --- MoveFolderPicker tests ---
+
+    fn make_move_picker_view(count: usize, selected: usize) -> View {
+        let folders = (0..count)
+            .map(|i| FolderEntry {
+                name: format!("folder{i}"),
+                account: String::new(),
+            })
+            .collect();
+        View::MoveFolderPicker(MoveFolderPickerState {
+            folders,
+            selected,
+            source_envelope_id: "1".to_string(),
+            source_envelope_index: 0,
+            source_folder: "INBOX".to_string(),
+            account_key: String::new(),
+            return_to_folder: false,
+            folder_envelope_state: None,
+        })
+    }
+
+    #[test]
+    fn move_picker_select_next_advances() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_move_picker_view(3, 0);
+        app.folder_select_next();
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
+    }
+
+    #[test]
+    fn move_picker_select_next_clamps() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_move_picker_view(2, 1);
+        app.folder_select_next();
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
+    }
+
+    #[test]
+    fn move_picker_select_prev_decrements() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_move_picker_view(3, 2);
+        app.folder_select_prev();
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
+    }
+
+    #[test]
+    fn move_picker_select_prev_clamps_at_zero() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_move_picker_view(3, 0);
+        app.folder_select_prev();
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
+    }
+
+    #[test]
+    fn move_picker_search_filters_folders() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_move_picker_view(3, 0); // folder0, folder1, folder2
+        app.start_search();
+        app.search_push_char('1'); // should match "folder1"
+        let search = app.search.as_ref().unwrap();
+        assert!(search.matched_indices.contains(&1));
+        assert!(!search.matched_indices.contains(&0) || !search.matched_indices.contains(&2));
+    }
+
+    #[test]
+    fn move_picker_confirm_search_maps_selection() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_move_picker_view(3, 0);
+        app.start_search();
+        app.search_push_char('2'); // match folder2 at index 2
+        assert!(app.confirm_search());
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert_eq!(state.selected, 2);
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
     }
 }

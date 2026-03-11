@@ -146,7 +146,9 @@ fn toggle_labels(env: Option<&EnvelopeData>) -> (&'static str, &'static str) {
 /// Build the compose hints line shown on the second row of the bottom bar.
 fn compose_hints_line() -> Line<'static> {
     Line::from(vec![
-        Span::styled(" N", Style::default().fg(Color::Yellow)),
+        Span::styled(" E", Style::default().fg(Color::Yellow)),
+        Span::raw(": edit | "),
+        Span::styled("N", Style::default().fg(Color::Yellow)),
         Span::raw(": new | "),
         Span::styled("R", Style::default().fg(Color::Yellow)),
         Span::raw(": reply | "),

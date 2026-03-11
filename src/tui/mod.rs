@@ -290,6 +290,7 @@ struct EnvelopeContext {
     id: String,
     unseen: bool,
     flagged: bool,
+    is_draft: bool,
     account_key: String,
     folder: String,
 }
@@ -306,6 +307,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
                     id: env.id.clone(),
                     unseen: env.unseen,
                     flagged: env.flagged,
+                    is_draft: env.flags.contains('T'),
                     account_key: state.account_key.clone(),
                     folder: state.folder_name.clone(),
                 })
@@ -317,6 +319,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
             id: env.id.clone(),
             unseen: env.unseen,
             flagged: env.flagged,
+            is_draft: env.flags.contains('T'),
             account_key: ctx.account_key.clone(),
             folder: ctx.folder_name.clone(),
         }),
@@ -326,6 +329,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
                 id: env.id.clone(),
                 unseen: env.unseen,
                 flagged: env.flagged,
+                is_draft: env.flags.contains('T'),
                 account_key,
                 folder: app.folder.clone(),
             }
@@ -529,9 +533,11 @@ async fn handle_compose(
         }
     };
 
-    // Ensure EDITOR is set (default to vim)
     if std::env::var("EDITOR").is_err() {
-        std::env::set_var("EDITOR", "vim");
+        app.status = Some(Status::Error(
+            "EDITOR environment variable is not set".to_string(),
+        ));
+        return Ok(());
     }
 
     // Suspend TUI
@@ -555,6 +561,117 @@ async fn handle_compose(
                 }
             }
             // Refresh envelope list
+            refresh_envelope_list(app, backends, terminal).await;
+        }
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Editor error: {e}")));
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_edit_message(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    default_account: &str,
+) -> Result<()> {
+    let ctx = match active_envelope_context(app, default_account) {
+        Some(ctx) => ctx,
+        None => {
+            app.status = Some(Status::Error("No message selected".to_string()));
+            return Ok(());
+        }
+    };
+
+    let (id_str, account_key, folder, is_draft) =
+        (ctx.id, ctx.account_key, ctx.folder, ctx.is_draft);
+
+    let Some((backend, account_config, _, _, toml_account_config)) = backends.get(&account_key)
+    else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
+    let id: usize = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            app.status = Some(Status::Error(format!("Invalid envelope ID: {id_str}")));
+            return Ok(());
+        }
+    };
+
+    app.status = Some(Status::Working("Editing…".to_string()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    // Fetch message and build editable template
+    let tpl = match backend.get_messages(&folder, &[id]).await {
+        Ok(msgs) => match msgs.first() {
+            Some(msg) => msg.to_read_tpl(account_config, |tpl| tpl).await,
+            None => {
+                app.status = Some(Status::Error(format!("Cannot find message {id}")));
+                return Ok(());
+            }
+        },
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Fetch failed: {e}")));
+            return Ok(());
+        }
+    };
+
+    let tpl = match tpl {
+        Ok(t) => t,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Template error: {e}")));
+            return Ok(());
+        }
+    };
+
+    // Build a send-capable backend
+    let compose_backend = match build_compose_backend(toml_account_config, account_config).await {
+        Ok(b) => b,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Compose setup failed: {e}")));
+            return Ok(());
+        }
+    };
+
+    if std::env::var("EDITOR").is_err() {
+        app.status = Some(Status::Error(
+            "EDITOR environment variable is not set".to_string(),
+        ));
+        return Ok(());
+    }
+
+    // Suspend TUI
+    ratatui::restore();
+
+    // Run editor flow
+    let mut printer = StdoutPrinter::default();
+    let editor_result =
+        editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
+            .await;
+
+    // Restore TUI
+    *terminal = ratatui::init();
+
+    match editor_result {
+        Ok(()) => {
+            // Delete the original draft from the server. This runs for all
+            // editor exits (send, save-as-remote-draft, discard) because
+            // edit_tpl_with_editor returns Ok(()) for all of them.
+            //
+            // Known edge case: if a stale *local* draft exists from an
+            // unrelated compose, the editor's pre-edit prompt may lead to
+            // the original remote draft being deleted even though the user
+            // never actually edited it. This is a limitation of pimalaya-tui's
+            // single shared local draft file.
+            if is_draft {
+                let _ = backend.delete_messages(&folder, &[id]).await;
+            }
             refresh_envelope_list(app, backends, terminal).await;
         }
         Err(e) => {
@@ -1251,6 +1368,11 @@ async fn run_event_loop(
                             }
                         }
                     }
+                }
+                Action::EditMessage => {
+                    handle_edit_message(app, terminal, backends, default_account)
+                        .await
+                        .ok();
                 }
                 Action::ComposeMessage => {
                     if backends.len() > 1 {

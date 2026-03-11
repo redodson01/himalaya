@@ -35,6 +35,7 @@ pub enum Action {
     ReplyMessage,
     ReplyAllMessage,
     ForwardMessage,
+    EditMessage,
     ConfirmAccountPicker,
     CancelAccountPicker,
 }
@@ -84,6 +85,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('N') => Action::ComposeMessage,
             KeyCode::Char('R') => Action::ReplyMessage,
             KeyCode::Char('A') => Action::ReplyAllMessage,
+            KeyCode::Char('E') => Action::EditMessage,
             KeyCode::Char('F') => Action::ForwardMessage,
             KeyCode::Char('\\') => Action::OpenFolderList,
             KeyCode::Char('/') => Action::StartSearch,
@@ -107,6 +109,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
             KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('E') => Action::EditMessage,
             KeyCode::Char('N') => Action::ComposeMessage,
             KeyCode::Char('R') => Action::ReplyMessage,
             KeyCode::Char('A') => Action::ReplyAllMessage,
@@ -124,6 +127,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('n') => Action::NextMessage,
             KeyCode::Char('f') => Action::ToggleFlag,
             KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('E') => Action::EditMessage,
             KeyCode::Char('N') => Action::ComposeMessage,
             KeyCode::Char('R') => Action::ReplyMessage,
             KeyCode::Char('A') => Action::ReplyAllMessage,
@@ -772,6 +776,32 @@ mod tests {
         assert_eq!(
             action_for_key(&message_view(), KeyCode::Char('F'), false),
             Action::ForwardMessage
+        );
+    }
+
+    // --- EditMessage keybindings ---
+
+    #[test]
+    fn list_e_edits() {
+        assert_eq!(
+            action_for_key(&list_view(), KeyCode::Char('E'), false),
+            Action::EditMessage
+        );
+    }
+
+    #[test]
+    fn folder_envelope_e_edits() {
+        assert_eq!(
+            action_for_key(&folder_envelope_view(), KeyCode::Char('E'), false),
+            Action::EditMessage
+        );
+    }
+
+    #[test]
+    fn message_e_edits() {
+        assert_eq!(
+            action_for_key(&message_view(), KeyCode::Char('E'), false),
+            Action::EditMessage
         );
     }
 

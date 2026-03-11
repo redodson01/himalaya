@@ -35,6 +35,8 @@ pub enum Action {
     ReplyMessage,
     ReplyAllMessage,
     ForwardMessage,
+    ConfirmAccountPicker,
+    CancelAccountPicker,
 }
 
 pub fn handle_event(view: &View, searching: bool) -> color_eyre::Result<Action> {
@@ -133,6 +135,14 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
             KeyCode::Enter => Action::ConfirmMove,
+            KeyCode::Char('/') => Action::StartSearch,
+            _ => Action::None,
+        },
+        View::AccountPicker(_) => match key {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CancelAccountPicker,
+            KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
+            KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
+            KeyCode::Enter => Action::ConfirmAccountPicker,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
@@ -762,6 +772,64 @@ mod tests {
         assert_eq!(
             action_for_key(&message_view(), KeyCode::Char('F'), false),
             Action::ForwardMessage
+        );
+    }
+
+    // --- AccountPicker keybindings ---
+
+    fn account_picker_view() -> View {
+        use crate::tui::app::AccountPickerState;
+        View::AccountPicker(AccountPickerState {
+            accounts: vec!["work".to_string(), "personal".to_string()],
+            selected: 0,
+        })
+    }
+
+    #[test]
+    fn account_picker_esc_cancels() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), KeyCode::Esc, false),
+            Action::CancelAccountPicker
+        );
+    }
+
+    #[test]
+    fn account_picker_q_cancels() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), KeyCode::Char('q'), false),
+            Action::CancelAccountPicker
+        );
+    }
+
+    #[test]
+    fn account_picker_j_selects_next() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), KeyCode::Char('j'), false),
+            Action::FolderSelectNext
+        );
+    }
+
+    #[test]
+    fn account_picker_k_selects_prev() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), KeyCode::Char('k'), false),
+            Action::FolderSelectPrev
+        );
+    }
+
+    #[test]
+    fn account_picker_enter_confirms() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), KeyCode::Enter, false),
+            Action::ConfirmAccountPicker
+        );
+    }
+
+    #[test]
+    fn account_picker_unknown_is_none() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), KeyCode::Char('z'), false),
+            Action::None
         );
     }
 }

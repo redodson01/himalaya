@@ -139,6 +139,11 @@ pub struct MoveFolderPickerState {
     pub folder_envelope_state: Option<Box<FolderEnvelopeState>>,
 }
 
+pub struct AccountPickerState {
+    pub accounts: Vec<String>,
+    pub selected: usize,
+}
+
 pub enum View {
     EnvelopeList,
     MessageRead {
@@ -149,6 +154,7 @@ pub enum View {
     FolderList(FolderListState),
     FolderEnvelopeList(FolderEnvelopeState),
     MoveFolderPicker(MoveFolderPickerState),
+    AccountPicker(AccountPickerState),
 }
 
 pub enum Status {
@@ -208,6 +214,11 @@ impl App {
                     state.selected = (state.selected + 1).min(state.folders.len() - 1);
                 }
             }
+            View::AccountPicker(state) => {
+                if !state.accounts.is_empty() {
+                    state.selected = (state.selected + 1).min(state.accounts.len() - 1);
+                }
+            }
             _ => {}
         }
     }
@@ -218,6 +229,9 @@ impl App {
                 state.selected = state.selected.saturating_sub(1);
             }
             View::MoveFolderPicker(state) => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            View::AccountPicker(state) => {
                 state.selected = state.selected.saturating_sub(1);
             }
             _ => {}
@@ -266,6 +280,7 @@ impl App {
             View::FolderList(state) => state.folders.len(),
             View::FolderEnvelopeList(state) => state.envelopes.len(),
             View::MoveFolderPicker(state) => state.folders.len(),
+            View::AccountPicker(state) => state.accounts.len(),
             View::MessageRead { .. } => return, // no-op
         };
         self.search = Some(SearchState {
@@ -296,6 +311,7 @@ impl App {
             View::FolderList(state) => state.selected = original_index,
             View::FolderEnvelopeList(state) => state.selected = original_index,
             View::MoveFolderPicker(state) => state.selected = original_index,
+            View::AccountPicker(state) => state.selected = original_index,
             View::MessageRead { .. } => {}
         }
         true
@@ -341,6 +357,7 @@ impl App {
                 View::FolderList(state) => state.folders.len(),
                 View::FolderEnvelopeList(state) => state.envelopes.len(),
                 View::MoveFolderPicker(state) => state.folders.len(),
+                View::AccountPicker(state) => state.accounts.len(),
                 View::MessageRead { .. } => 0,
             };
             search.matched_indices = (0..len).collect();
@@ -371,6 +388,7 @@ impl App {
                 .map(|e| format!("{} {}", e.subject, e.from))
                 .collect(),
             View::MoveFolderPicker(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
+            View::AccountPicker(state) => state.accounts.clone(),
             View::MessageRead { .. } => Vec::new(),
         };
 

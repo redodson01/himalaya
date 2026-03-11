@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::tui::app::{
-    App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection, MoveFolderPickerState,
-    Status, View,
+    AccountPickerState, App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection,
+    MoveFolderPickerState, Status, View,
 };
 
 const FROM_COLOR: Color = Color::Cyan;
@@ -122,6 +122,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         View::FolderEnvelopeList(state) => render_folder_envelope_list(frame, state, app),
         View::MoveFolderPicker(state) => render_move_folder_picker(frame, state, app),
+        View::AccountPicker(state) => render_account_picker(frame, state, app),
     }
 }
 
@@ -621,6 +622,76 @@ fn render_move_folder_picker(frame: &mut Frame, state: &MoveFolderPickerState, a
                 Span::raw(": navigate | "),
                 Span::styled("Enter", Style::default().fg(Color::Yellow)),
                 Span::raw(": move here | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
+        };
+        frame.render_widget(Paragraph::new(status_line), chunks[1]);
+    }
+}
+
+fn render_account_picker(frame: &mut Frame, state: &AccountPickerState, app: &App) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+
+    let searching = app.search.is_some();
+    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
+
+    let visible_indices: Vec<usize> = match app.search.as_ref() {
+        Some(s) => s.matched_indices.clone(),
+        None => (0..state.accounts.len()).collect(),
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut item_to_table_row: Vec<usize> = Vec::new();
+
+    if !visible_indices.is_empty() {
+        rows.push(Row::new([Cell::from("")]));
+    }
+
+    for &i in visible_indices.iter() {
+        item_to_table_row.push(rows.len());
+        rows.push(Row::new([Cell::from(format!("  {}", state.accounts[i]))]));
+    }
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .column_spacing(0)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Compose: Select Account "),
+        );
+
+    let highlight_pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == state.selected)
+            .unwrap_or(0)
+    };
+    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let mut table_state = TableState::default().with_selected(Some(table_selected));
+    frame.render_stateful_widget(table, chunks[0], &mut table_state);
+
+    if !render_search_bottom(frame, chunks[1], app) {
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": cancel | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": select | "),
                 Span::styled("/", Style::default().fg(Color::Yellow)),
                 Span::raw(": search"),
             ])

@@ -541,7 +541,7 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `d` | Delete message |
 | `a` | Archive message |
 | `m` | Move message to folder |
-| `N` | Compose new message |
+| `N` | Compose new message (account picker in multi-account mode) |
 | `R` | Reply to message |
 | `A` | Reply all |
 | `F` | Forward message |
@@ -571,7 +571,7 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `d` | Delete message |
 | `a` | Archive message |
 | `m` | Move message to folder |
-| `N` | Compose new message |
+| `N` | Compose new message (account picker in multi-account mode) |
 | `R` | Reply to message |
 | `A` | Reply all |
 | `F` | Forward message |
@@ -590,7 +590,7 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `d` | Delete message |
 | `a` | Archive message |
 | `m` | Move message to folder |
-| `N` | Compose new message |
+| `N` | Compose new message (account picker in multi-account mode) |
 | `R` | Reply to message |
 | `A` | Reply all |
 | `F` | Forward message |

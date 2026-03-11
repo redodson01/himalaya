@@ -23,8 +23,8 @@ use pimalaya_tui::{
 use crate::config::TomlConfig;
 
 use self::app::{
-    sort_flags, AccountSection, App, EnvelopeData, FolderEntry, FolderEnvelopeState,
-    FolderListState, FolderSection, MoveFolderPickerState, Status, View,
+    sort_flags, AccountPickerState, AccountSection, App, EnvelopeData, FolderEntry,
+    FolderEnvelopeState, FolderListState, FolderSection, MoveFolderPickerState, Status, View,
 };
 use self::event::{handle_event, Action};
 
@@ -433,11 +433,16 @@ async fn handle_compose(
     backends: &BackendMap,
     default_account: &str,
     kind: ComposeKind,
+    account_override: Option<&str>,
 ) -> Result<()> {
     // Determine account key and envelope context
     let (account_key, envelope_id, folder) = match kind {
         ComposeKind::New => {
-            let mut key = account_key_for(app, default_account);
+            let mut key = if let Some(ovr) = account_override {
+                ovr.to_string()
+            } else {
+                account_key_for(app, default_account)
+            };
             // If key doesn't match a backend (e.g. empty list in multi-account),
             // fall back to the first available account.
             if !backends.contains_key(&key) {
@@ -1251,14 +1256,58 @@ async fn run_event_loop(
                     }
                 }
                 Action::ComposeMessage => {
-                    handle_compose(app, terminal, backends, default_account, ComposeKind::New)
+                    if backends.len() > 1 {
+                        let mut accounts: Vec<String> = backends.keys().cloned().collect();
+                        accounts.sort();
+                        app.view = View::AccountPicker(AccountPickerState {
+                            accounts,
+                            selected: 0,
+                        });
+                    } else {
+                        handle_compose(
+                            app,
+                            terminal,
+                            backends,
+                            default_account,
+                            ComposeKind::New,
+                            None,
+                        )
                         .await
                         .ok();
+                    }
+                }
+                Action::ConfirmAccountPicker => {
+                    if let View::AccountPicker(ref state) = app.view {
+                        if let Some(account_key) = state.accounts.get(state.selected) {
+                            let key = account_key.clone();
+                            app.view = View::EnvelopeList;
+                            handle_compose(
+                                app,
+                                terminal,
+                                backends,
+                                default_account,
+                                ComposeKind::New,
+                                Some(&key),
+                            )
+                            .await
+                            .ok();
+                        }
+                    }
+                }
+                Action::CancelAccountPicker => {
+                    app.view = View::EnvelopeList;
                 }
                 Action::ReplyMessage => {
-                    handle_compose(app, terminal, backends, default_account, ComposeKind::Reply)
-                        .await
-                        .ok();
+                    handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::Reply,
+                        None,
+                    )
+                    .await
+                    .ok();
                 }
                 Action::ReplyAllMessage => {
                     handle_compose(
@@ -1267,6 +1316,7 @@ async fn run_event_loop(
                         backends,
                         default_account,
                         ComposeKind::ReplyAll,
+                        None,
                     )
                     .await
                     .ok();
@@ -1278,6 +1328,7 @@ async fn run_event_loop(
                         backends,
                         default_account,
                         ComposeKind::Forward,
+                        None,
                     )
                     .await
                     .ok();

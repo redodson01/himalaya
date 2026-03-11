@@ -71,12 +71,12 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Char('a') => Action::ArchiveMessage,
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
-            KeyCode::Char('g') => Action::OpenFolderList,
+            KeyCode::Char('\\') => Action::OpenFolderList,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
         View::FolderList(_) => match key {
-            KeyCode::Esc | KeyCode::Char('b') => Action::BackFromFolders,
+            KeyCode::Esc | KeyCode::Char('q') => Action::BackFromFolders,
             KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
             KeyCode::Enter => Action::SelectFolder,
@@ -84,7 +84,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             _ => Action::None,
         },
         View::FolderEnvelopeList(_) => match key {
-            KeyCode::Esc | KeyCode::Char('b') => Action::BackFromFolderEnvelopes,
+            KeyCode::Esc | KeyCode::Char('q') => Action::BackFromFolderEnvelopes,
             KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
             KeyCode::Enter => Action::ReadMessage,
@@ -96,7 +96,7 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             _ => Action::None,
         },
         View::MessageRead { .. } => match key {
-            KeyCode::Esc | KeyCode::Char('b') => Action::BackToList,
+            KeyCode::Esc | KeyCode::Char('q') => Action::BackToList,
             KeyCode::Down | KeyCode::Char('j') => Action::ScrollDown,
             KeyCode::Up | KeyCode::Char('k') => Action::ScrollUp,
             KeyCode::Char('d') => Action::DeleteMessage,
@@ -207,12 +207,12 @@ mod tests {
         );
     }
 
-    // --- Envelope list: g opens folders ---
+    // --- Envelope list: \ opens folders ---
 
     #[test]
-    fn list_g_opens_folders() {
+    fn list_backslash_opens_folders() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('g'), false),
+            action_for_key(&list_view(), KeyCode::Char('\\'), false),
             Action::OpenFolderList
         );
     }
@@ -262,17 +262,17 @@ mod tests {
     }
 
     #[test]
-    fn folder_b_goes_back() {
+    fn folder_q_goes_back() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('b'), false),
+            action_for_key(&folder_view(), KeyCode::Char('q'), false),
             Action::BackFromFolders
         );
     }
 
     #[test]
-    fn folder_q_is_none() {
+    fn folder_b_is_none() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('q'), false),
+            action_for_key(&folder_view(), KeyCode::Char('b'), false),
             Action::None
         );
     }
@@ -312,9 +312,9 @@ mod tests {
     }
 
     #[test]
-    fn folder_envelope_b_goes_back() {
+    fn folder_envelope_q_goes_back() {
         assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('b'), false),
+            action_for_key(&folder_envelope_view(), KeyCode::Char('q'), false),
             Action::BackFromFolderEnvelopes
         );
     }
@@ -344,9 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn folder_envelope_q_is_none() {
+    fn folder_envelope_b_is_none() {
         assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('q'), false),
+            action_for_key(&folder_envelope_view(), KeyCode::Char('b'), false),
             Action::None
         );
     }
@@ -362,9 +362,9 @@ mod tests {
     }
 
     #[test]
-    fn message_b_goes_back() {
+    fn message_q_goes_back() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('b'), false),
+            action_for_key(&message_view(), KeyCode::Char('q'), false),
             Action::BackToList
         );
     }
@@ -426,9 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn message_q_is_not_back() {
+    fn message_b_is_none() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('q'), false),
+            action_for_key(&message_view(), KeyCode::Char('b'), false),
             Action::None
         );
     }

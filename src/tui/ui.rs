@@ -314,7 +314,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
                 Span::raw(": delete | "),
                 Span::styled("a", Style::default().fg(Color::Yellow)),
                 Span::raw(": archive | "),
-                Span::styled("g", Style::default().fg(Color::Yellow)),
+                Span::styled("\\", Style::default().fg(Color::Yellow)),
                 Span::raw(": folders | "),
                 Span::styled("/", Style::default().fg(Color::Yellow)),
                 Span::raw(": search"),
@@ -413,7 +413,7 @@ fn render_folder_list(
             ))
         } else {
             Line::from(vec![
-                Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
                 Span::raw(": back | "),
                 Span::styled("j/k", Style::default().fg(Color::Yellow)),
                 Span::raw(": navigate | "),
@@ -488,7 +488,7 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
         } else {
             let (read_label, flag_label) = toggle_labels(fe_state.envelopes.get(fe_state.selected));
             Line::from(vec![
-                Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
                 Span::raw(": back | "),
                 Span::styled("j/k", Style::default().fg(Color::Yellow)),
                 Span::raw(": navigate | "),
@@ -583,7 +583,7 @@ fn render_message(
     } else {
         let (read_label, flag_label) = toggle_labels(active_env);
         Line::from(vec![
-            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
+            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
             Span::raw(": back | "),
             Span::styled("j/k", Style::default().fg(Color::Yellow)),
             Span::raw(": scroll | "),

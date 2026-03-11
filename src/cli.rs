@@ -71,6 +71,15 @@ pub struct Cli {
     #[arg(long, global = true, env = "HIMALAYA_TUI")]
     pub tui: bool,
 
+    /// Override the default account.
+    ///
+    /// An account name corresponds to an entry in the table at the
+    /// root level of your TOML configuration file.
+    #[arg(long = "account", short = 'a', global = true, env = "HIMALAYA_ACCOUNT")]
+    #[arg(value_name = "NAME")]
+    #[arg(conflicts_with = "all")]
+    pub account: Option<String>,
+
     /// Run listing commands across all configured accounts.
     ///
     /// When set, read-only listing commands (envelope list, envelope thread,
@@ -148,6 +157,20 @@ pub enum HimalayaCommand {
 }
 
 impl HimalayaCommand {
+    /// Propagate the global `--account` flag into the inner subcommand.
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::Account(_) => {} // account subcommands don't take --account
+            Self::Folder(sub) => sub.set_account(name),
+            Self::Envelope(sub) => sub.set_account(name),
+            Self::Flag(sub) => sub.set_account(name),
+            Self::Message(sub) => sub.set_account(name),
+            Self::Attachment(sub) => sub.set_account(name),
+            Self::Template(sub) => sub.set_account(name),
+            Self::Manual(_) | Self::Completion(_) => {}
+        }
+    }
+
     pub async fn execute(
         self,
         printer: &mut impl Printer,
@@ -206,24 +229,9 @@ impl HimalayaCommand {
         }
 
         let listing = match self {
-            Self::Envelope(EnvelopeSubcommand::List(cmd)) => {
-                if cmd.account.name.is_some() {
-                    color_eyre::eyre::bail!("--all and --account are mutually exclusive");
-                }
-                ListingCommand::EnvelopeList(cmd)
-            }
-            Self::Envelope(EnvelopeSubcommand::Thread(cmd)) => {
-                if cmd.account.name.is_some() {
-                    color_eyre::eyre::bail!("--all and --account are mutually exclusive");
-                }
-                ListingCommand::EnvelopeThread(cmd)
-            }
-            Self::Folder(FolderSubcommand::List(cmd)) => {
-                if cmd.account.name.is_some() {
-                    color_eyre::eyre::bail!("--all and --account are mutually exclusive");
-                }
-                ListingCommand::FolderList(cmd)
-            }
+            Self::Envelope(EnvelopeSubcommand::List(cmd)) => ListingCommand::EnvelopeList(cmd),
+            Self::Envelope(EnvelopeSubcommand::Thread(cmd)) => ListingCommand::EnvelopeThread(cmd),
+            Self::Folder(FolderSubcommand::List(cmd)) => ListingCommand::FolderList(cmd),
             _ => {
                 color_eyre::eyre::bail!(
                     "--all can only be used with listing commands (envelope list, envelope thread, folder list)"

@@ -25,7 +25,7 @@ pub struct OptionalAccountNameArg {
 }
 
 /// The account name flag parser.
-#[derive(Debug, Default, Parser)]
+#[derive(Clone, Debug, Default, Parser)]
 pub struct AccountNameFlag {
     /// Override the default account.
     ///

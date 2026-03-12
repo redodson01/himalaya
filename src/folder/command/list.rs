@@ -20,7 +20,7 @@ use crate::{account::arg::name::AccountNameFlag, config::TomlConfig};
 /// List all folders.
 ///
 /// This command allows you to list all exsting folders.
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 pub struct FolderListCommand {
     #[command(flatten)]
     pub account: AccountNameFlag,

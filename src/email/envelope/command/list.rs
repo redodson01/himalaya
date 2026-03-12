@@ -22,7 +22,7 @@ use crate::{
 ///
 /// This command allows you to list envelopes included in the given
 /// folder, matching the given query.
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 pub struct EnvelopeListCommand {
     #[command(flatten)]
     pub folder: FolderNameOptionalFlag,

@@ -7,13 +7,16 @@ use std::sync::Arc;
 
 use color_eyre::Result;
 use email::{
-    backend::feature::BackendFeatureSource, config::Config, envelope::list::ListEnvelopesOptions,
+    backend::feature::BackendFeatureSource,
+    config::Config,
+    envelope::list::ListEnvelopesOptions,
+    flag::{Flag, Flags},
 };
 use pimalaya_tui::{himalaya::backend::BackendBuilder, terminal::config::TomlConfig as _};
 
 use crate::config::TomlConfig;
 
-use self::app::{App, EnvelopeData, View};
+use self::app::{sort_flags, App, EnvelopeData, View};
 use self::event::{handle_event, Action};
 
 /// Drop guard that restores the terminal on exit (including panics).
@@ -43,6 +46,7 @@ pub async fn run(config_paths: &[PathBuf], _all: bool, _account: Option<String>)
                 .without_features()
                 .with_list_envelopes(BackendFeatureSource::Context)
                 .with_get_messages(BackendFeatureSource::Context)
+                .with_add_flags(BackendFeatureSource::Context)
         },
     )
     .without_sending_backend()
@@ -81,9 +85,16 @@ pub async fn run(config_paths: &[PathBuf], _all: bool, _account: Option<String>)
             Action::ReadMessage => {
                 if let Some(env) = app.envelopes.get(app.selected) {
                     let id_str = env.id.clone();
+                    let was_unseen = env.unseen;
                     let content = match id_str.parse::<usize>() {
                         Ok(id) => match backend.get_messages(&folder, &[id]).await {
                             Ok(emails) => {
+                                // Mark as seen on the server if previously unseen
+                                if was_unseen {
+                                    let seen = Flags::from_iter([Flag::Seen]);
+                                    let _ = backend.add_flags(&folder, &[id], &seen).await;
+                                }
+
                                 let mut body = String::new();
                                 for email in emails.to_vec() {
                                     match email.to_read_tpl(&account_config, |tpl| tpl).await {
@@ -99,6 +110,17 @@ pub async fn run(config_paths: &[PathBuf], _all: bool, _account: Option<String>)
                         },
                         Err(_) => format!("Invalid envelope ID: {id_str}"),
                     };
+
+                    // Update local state to reflect the message is now seen
+                    if was_unseen {
+                        if let Some(env) = app.envelopes.get_mut(app.selected) {
+                            env.unseen = false;
+                            if !env.flags.contains('S') {
+                                env.flags = sort_flags(&format!("S{}", env.flags));
+                            }
+                        }
+                    }
+
                     app.view = View::MessageRead { content, scroll: 0 };
                 }
             }

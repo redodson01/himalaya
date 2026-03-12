@@ -162,12 +162,67 @@ fn render_flag_legend(frame: &mut Frame, area: ratatui::layout::Rect) {
     );
 }
 
+fn render_search_bar(frame: &mut Frame, area: ratatui::layout::Rect, query: &str) {
+    let text = Line::from(vec![
+        Span::styled("/", Style::default().fg(Color::Yellow)),
+        Span::raw(query),
+        Span::styled("_", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(text), area);
+}
+
+/// Render the search-mode bottom bar. Returns `true` if handled (caller should
+/// skip normal bottom-bar rendering).
+fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) -> bool {
+    let Some(search) = &app.search else {
+        return false;
+    };
+    if let Some(status) = &app.status {
+        let (msg, color) = match status {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        let line = Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(Paragraph::new(line), area);
+    } else {
+        render_search_bar(frame, area, &search.query);
+    }
+    true
+}
+
 fn render_envelope_list(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    // Build a set of envelope indices that start a new account section,
-    // tracking whether each is the first section (to skip the blank separator).
-    let section_starts: std::collections::HashMap<usize, (&str, bool)> = {
+    let searching = app.search.is_some();
+    let matched_indices = app.search.as_ref().map(|s| &s.matched_indices[..]);
+    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
+
+    // Determine which envelope indices to show
+    let visible_indices: Vec<usize> = match matched_indices {
+        Some(indices) => indices.to_vec(),
+        None => (0..app.envelopes.len()).collect(),
+    };
+    let visible_set: std::collections::HashSet<usize> = visible_indices.iter().copied().collect();
+
+    // Build section starts for visible items only
+    let section_starts: std::collections::HashMap<usize, (&str, bool)> = if searching {
+        let mut map = std::collections::HashMap::new();
+        let mut first = true;
+        for section in &app.sections {
+            // Find first visible index in this section
+            let first_visible =
+                (section.start..section.start + section.count).find(|i| visible_set.contains(i));
+            if let Some(idx) = first_visible {
+                let is_first = first;
+                first = false;
+                map.insert(idx, (section.name.as_str(), is_first));
+            }
+        }
+        map
+    } else {
         let mut first = true;
         app.sections
             .iter()
@@ -180,14 +235,11 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             .collect()
     };
 
-    // Build rows, inserting visual section headers when the account changes.
-    // We track a mapping from table-row index to envelope index so that
-    // the selected highlight lands on the right table row.
     let mut rows: Vec<Row> = Vec::new();
-    let mut envelope_to_table_row: Vec<usize> = Vec::new();
+    let mut item_to_table_row: Vec<usize> = Vec::new();
 
-    for (i, e) in app.envelopes.iter().enumerate() {
-        // Insert a section header row if this envelope starts a new section
+    for (pos, &i) in visible_indices.iter().enumerate() {
+        let e = &app.envelopes[i];
         if let Some((account_name, is_first)) = section_starts.get(&i) {
             if !is_first {
                 rows.push(Row::new(std::iter::repeat_with(|| Cell::from("")).take(11)));
@@ -200,8 +252,13 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             rows.push(Row::new(cells));
         }
 
-        envelope_to_table_row.push(rows.len());
-        rows.push(envelope_row(e, app.selected == i));
+        item_to_table_row.push(rows.len());
+        let is_selected = if searching {
+            pos == search_selected
+        } else {
+            i == app.selected
+        };
+        rows.push(envelope_row(e, is_selected));
     }
 
     let table = Table::new(rows, ENVELOPE_WIDTHS)
@@ -213,51 +270,59 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
                 .title(format!(" {} ", app.folder)),
         );
 
-    // Map the envelope selection index to the correct table row
-    let table_selected = envelope_to_table_row
-        .get(app.selected)
-        .copied()
-        .unwrap_or(app.selected);
+    let highlight_pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == app.selected)
+            .unwrap_or(0)
+    };
+    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
     let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
-    let chunks_bottom =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(chunks[1]);
+    if !render_search_bottom(frame, chunks[1], app) {
+        let chunks_bottom =
+            Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+                .split(chunks[1]);
 
-    let status_line = if let Some(status) = &app.status {
-        let (msg, color) = match status {
-            Status::Working(msg) => (msg.as_str(), Color::Yellow),
-            Status::Error(msg) => (msg.as_str(), Color::Red),
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": quit | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": read | "),
+                Span::styled("r", Style::default().fg(Color::Yellow)),
+                Span::raw(read_label),
+                Span::styled("f", Style::default().fg(Color::Yellow)),
+                Span::raw(flag_label),
+                Span::raw(" | "),
+                Span::styled("d", Style::default().fg(Color::Yellow)),
+                Span::raw(": delete | "),
+                Span::styled("a", Style::default().fg(Color::Yellow)),
+                Span::raw(": archive | "),
+                Span::styled("\\", Style::default().fg(Color::Yellow)),
+                Span::raw(": folders | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
         };
-        Line::from(Span::styled(
-            format!(" {msg}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
-        Line::from(vec![
-            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
-            Span::raw(": quit | "),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::raw(": navigate | "),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(": read | "),
-            Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(read_label),
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::raw(flag_label),
-            Span::raw(" | "),
-            Span::styled("d", Style::default().fg(Color::Yellow)),
-            Span::raw(": delete | "),
-            Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(": archive | "),
-            Span::styled("g", Style::default().fg(Color::Yellow)),
-            Span::raw(": folders"),
-        ])
-    };
-    frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
-    render_flag_legend(frame, chunks_bottom[1]);
+        frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
+        render_flag_legend(frame, chunks_bottom[1]);
+    }
 }
 
 fn render_folder_list(
@@ -269,16 +334,38 @@ fn render_folder_list(
 ) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let section_starts: std::collections::HashMap<usize, &str> = sections
-        .iter()
-        .filter(|s| s.count > 0)
-        .map(|s| (s.start, s.name.as_str()))
-        .collect();
+    let searching = app.search.is_some();
+    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
+
+    let visible_indices: Vec<usize> = match app.search.as_ref() {
+        Some(s) => s.matched_indices.clone(),
+        None => (0..folders.len()).collect(),
+    };
+    let visible_set: std::collections::HashSet<usize> = visible_indices.iter().copied().collect();
+
+    let section_starts: std::collections::HashMap<usize, &str> = if searching {
+        let mut map = std::collections::HashMap::new();
+        for section in sections {
+            let first_visible =
+                (section.start..section.start + section.count).find(|i| visible_set.contains(i));
+            if let Some(idx) = first_visible {
+                map.insert(idx, section.name.as_str());
+            }
+        }
+        map
+    } else {
+        sections
+            .iter()
+            .filter(|s| s.count > 0)
+            .map(|s| (s.start, s.name.as_str()))
+            .collect()
+    };
 
     let mut rows: Vec<Row> = Vec::new();
     let mut folder_to_table_row: Vec<usize> = Vec::new();
 
-    for (i, f) in folders.iter().enumerate() {
+    for &i in visible_indices.iter() {
+        let f = &folders[i];
         if let Some(account_name) = section_starts.get(&i) {
             rows.push(Row::new([Cell::from("")]));
             let style = Style::default()
@@ -302,40 +389,66 @@ fn render_folder_list(
                 .title(" Select Folder "),
         );
 
-    let table_selected = folder_to_table_row.get(selected).copied().unwrap_or(0);
+    let highlight_pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == selected)
+            .unwrap_or(0)
+    };
+    let table_selected = folder_to_table_row.get(highlight_pos).copied().unwrap_or(0);
     let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
-    let status_line = if let Some(status) = &app.status {
-        let (msg, color) = match status {
-            Status::Working(msg) => (msg.as_str(), Color::Yellow),
-            Status::Error(msg) => (msg.as_str(), Color::Red),
+    if !render_search_bottom(frame, chunks[1], app) {
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": back | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": select folder | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
         };
-        Line::from(Span::styled(
-            format!(" {msg}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        Line::from(vec![
-            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
-            Span::raw(": back | "),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::raw(": navigate | "),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(": select folder"),
-        ])
-    };
-    frame.render_widget(Paragraph::new(status_line), chunks[1]);
+        frame.render_widget(Paragraph::new(status_line), chunks[1]);
+    }
 }
 
-fn render_folder_envelope_list(frame: &mut Frame, state: &FolderEnvelopeState, app: &App) {
+fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let rows: Vec<Row> = state
-        .envelopes
+    let searching = app.search.is_some();
+    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
+
+    let visible_indices: Vec<usize> = match app.search.as_ref() {
+        Some(s) => s.matched_indices.clone(),
+        None => (0..fe_state.envelopes.len()).collect(),
+    };
+
+    let rows: Vec<Row> = visible_indices
         .iter()
         .enumerate()
-        .map(|(i, e)| envelope_row(e, state.selected == i))
+        .map(|(pos, &i)| {
+            let is_selected = if searching {
+                pos == search_selected
+            } else {
+                i == fe_state.selected
+            };
+            envelope_row(&fe_state.envelopes[i], is_selected)
+        })
         .collect();
 
     let table = Table::new(rows, ENVELOPE_WIDTHS)
@@ -344,47 +457,59 @@ fn render_folder_envelope_list(frame: &mut Frame, state: &FolderEnvelopeState, a
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" {} ", state.folder_name)),
+                .title(format!(" {} ", fe_state.folder_name)),
         );
 
-    let mut table_state = TableState::default().with_selected(Some(state.selected));
+    let highlight_pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == fe_state.selected)
+            .unwrap_or(0)
+    };
+    let mut table_state = TableState::default().with_selected(Some(highlight_pos));
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
-    let chunks_bottom =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(chunks[1]);
+    if !render_search_bottom(frame, chunks[1], app) {
+        let chunks_bottom =
+            Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+                .split(chunks[1]);
 
-    let status_line = if let Some(status) = &app.status {
-        let (msg, color) = match status {
-            Status::Working(msg) => (msg.as_str(), Color::Yellow),
-            Status::Error(msg) => (msg.as_str(), Color::Red),
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            let (read_label, flag_label) = toggle_labels(fe_state.envelopes.get(fe_state.selected));
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": back | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": read | "),
+                Span::styled("r", Style::default().fg(Color::Yellow)),
+                Span::raw(read_label),
+                Span::styled("f", Style::default().fg(Color::Yellow)),
+                Span::raw(flag_label),
+                Span::raw(" | "),
+                Span::styled("d", Style::default().fg(Color::Yellow)),
+                Span::raw(": delete | "),
+                Span::styled("a", Style::default().fg(Color::Yellow)),
+                Span::raw(": archive | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
         };
-        Line::from(Span::styled(
-            format!(" {msg}"),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        let (read_label, flag_label) = toggle_labels(state.envelopes.get(state.selected));
-        Line::from(vec![
-            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
-            Span::raw(": back | "),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::raw(": navigate | "),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(": read | "),
-            Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(read_label),
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::raw(flag_label),
-            Span::raw(" | "),
-            Span::styled("d", Style::default().fg(Color::Yellow)),
-            Span::raw(": delete | "),
-            Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(": archive"),
-        ])
-    };
-    frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
-    render_flag_legend(frame, chunks_bottom[1]);
+        frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
+        render_flag_legend(frame, chunks_bottom[1]);
+    }
 }
 
 fn render_message(
@@ -458,7 +583,7 @@ fn render_message(
     } else {
         let (read_label, flag_label) = toggle_labels(active_env);
         Line::from(vec![
-            Span::styled(" Esc/b", Style::default().fg(Color::Yellow)),
+            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
             Span::raw(": back | "),
             Span::styled("j/k", Style::default().fg(Color::Yellow)),
             Span::raw(": scroll | "),

@@ -300,425 +300,370 @@ async fn run_event_loop(
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        let action = handle_event(&app.view)?;
+        let mut action = handle_event(&app.view, app.search.is_some())?;
 
         // Clear transient status on any keypress
         if !matches!(action, Action::None) && app.status.is_some() {
             app.status = None;
         }
 
-        // Determine if we're in a folder context (FolderEnvelopeList or
-        // MessageRead with folder_context). Extract envelope info accordingly.
-        let in_folder_context = matches!(
-            app.view,
-            View::FolderEnvelopeList(_)
-                | View::MessageRead {
-                    folder_context: Some(_),
-                    ..
-                }
-        );
-
-        match action {
-            Action::None => {}
-            Action::Quit => {
-                app.should_quit = true;
-            }
-            Action::SelectNext => {
-                if let View::FolderEnvelopeList(state) = &mut app.view {
-                    if !state.envelopes.is_empty() {
-                        state.selected = (state.selected + 1).min(state.envelopes.len() - 1);
+        // This loop allows SearchConfirm to set a follow-up action and re-enter.
+        let mut clear_search_after = false;
+        loop {
+            // Determine if we're in a folder context (FolderEnvelopeList or
+            // MessageRead with folder_context). Extract envelope info accordingly.
+            let in_folder_context = matches!(
+                app.view,
+                View::FolderEnvelopeList(_)
+                    | View::MessageRead {
+                        folder_context: Some(_),
+                        ..
                     }
-                } else {
-                    app.select_next();
-                }
-            }
-            Action::SelectPrev => {
-                if let View::FolderEnvelopeList(state) = &mut app.view {
-                    state.selected = state.selected.saturating_sub(1);
-                } else {
-                    app.select_prev();
-                }
-            }
-            Action::ReadMessage | Action::NextMessage => {
-                // Advance selection for NextMessage, with "no more" feedback
-                if matches!(action, Action::NextMessage) {
-                    let advanced = match &mut app.view {
-                        View::MessageRead {
-                            folder_context: Some(ctx),
-                            ..
-                        } if !ctx.envelopes.is_empty() => {
-                            let prev = ctx.selected;
-                            ctx.selected = (ctx.selected + 1).min(ctx.envelopes.len() - 1);
-                            ctx.selected != prev
-                        }
-                        View::MessageRead {
-                            folder_context: None,
-                            ..
-                        } => {
-                            let prev = app.selected;
-                            app.select_next();
-                            app.selected != prev
-                        }
-                        _ => false,
-                    };
-                    if !advanced {
-                        app.status = Some(Status::Working("No more messages".to_string()));
-                        continue;
-                    }
-                }
+            );
 
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    app.status = Some(Status::Working("Loading…".to_string()));
-                    terminal.draw(|frame| ui::render(frame, app))?;
-
-                    let content = if let Some((backend, account_config, _, _)) =
-                        backends.get(&ctx.account_key)
-                    {
-                        match ctx.id.parse::<usize>() {
-                            Ok(id) => match backend.get_messages(&ctx.folder, &[id]).await {
-                                Ok(emails) => {
-                                    let mut body = String::new();
-                                    for email in emails.to_vec() {
-                                        match email.to_read_tpl(account_config, |tpl| tpl).await {
-                                            Ok(tpl) => body.push_str(&tpl),
-                                            Err(e) => body
-                                                .push_str(&format!("Error reading message: {e}")),
-                                        }
-                                    }
-                                    body
-                                }
-                                Err(e) => format!("Error fetching message: {e}"),
-                            },
-                            Err(_) => format!("Invalid envelope ID: {}", ctx.id),
+            match action {
+                Action::None => {}
+                Action::Quit => {
+                    app.should_quit = true;
+                }
+                Action::SelectNext => {
+                    if app.search.is_some() {
+                        app.search_select_next();
+                    } else if let View::FolderEnvelopeList(state) = &mut app.view {
+                        if !state.envelopes.is_empty() {
+                            state.selected = (state.selected + 1).min(state.envelopes.len() - 1);
                         }
                     } else {
-                        format!("No backend for account: {}", ctx.account_key)
-                    };
-
-                    // Mark as seen locally
-                    if ctx.unseen {
-                        if let Some(env) = active_envelope_mut(app) {
-                            env.unseen = false;
-                            if !env.flags.contains('S') {
-                                env.flags = sort_flags(&format!("S{}", env.flags));
-                            }
-                        }
+                        app.select_next();
                     }
-
-                    // Transition to MessageRead
-                    app.status = None;
-                    if in_folder_context {
-                        // Take folder state out of current view, put into MessageRead
-                        let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                        let folder_state = match old_view {
-                            View::FolderEnvelopeList(state) => state,
+                }
+                Action::SelectPrev => {
+                    if app.search.is_some() {
+                        app.search_select_prev();
+                    } else if let View::FolderEnvelopeList(state) = &mut app.view {
+                        state.selected = state.selected.saturating_sub(1);
+                    } else {
+                        app.select_prev();
+                    }
+                }
+                Action::ReadMessage | Action::NextMessage => {
+                    // Advance selection for NextMessage, with "no more" feedback
+                    if matches!(action, Action::NextMessage) {
+                        let advanced = match &mut app.view {
                             View::MessageRead {
                                 folder_context: Some(ctx),
                                 ..
-                            } => *ctx,
-                            _ => unreachable!(),
+                            } if !ctx.envelopes.is_empty() => {
+                                let prev = ctx.selected;
+                                ctx.selected = (ctx.selected + 1).min(ctx.envelopes.len() - 1);
+                                ctx.selected != prev
+                            }
+                            View::MessageRead {
+                                folder_context: None,
+                                ..
+                            } => {
+                                let prev = app.selected;
+                                app.select_next();
+                                app.selected != prev
+                            }
+                            _ => false,
                         };
-                        app.view = View::MessageRead {
-                            content,
-                            scroll: 0,
-                            folder_context: Some(Box::new(folder_state)),
-                        };
-                    } else {
-                        app.view = View::MessageRead {
-                            content,
-                            scroll: 0,
-                            folder_context: None,
-                        };
+                        if !advanced {
+                            app.status = Some(Status::Working("No more messages".to_string()));
+                            continue;
+                        }
                     }
-                    terminal.draw(|frame| ui::render(frame, app))?;
 
-                    // Mark as read on server in background
-                    if ctx.unseen {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        app.status = Some(Status::Working("Loading…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let content = if let Some((backend, account_config, _, _)) =
+                            backends.get(&ctx.account_key)
+                        {
+                            match ctx.id.parse::<usize>() {
+                                Ok(id) => match backend.get_messages(&ctx.folder, &[id]).await {
+                                    Ok(emails) => {
+                                        let mut body = String::new();
+                                        for email in emails.to_vec() {
+                                            match email.to_read_tpl(account_config, |tpl| tpl).await
+                                            {
+                                                Ok(tpl) => body.push_str(&tpl),
+                                                Err(e) => body.push_str(&format!(
+                                                    "Error reading message: {e}"
+                                                )),
+                                            }
+                                        }
+                                        body
+                                    }
+                                    Err(e) => format!("Error fetching message: {e}"),
+                                },
+                                Err(_) => format!("Invalid envelope ID: {}", ctx.id),
+                            }
+                        } else {
+                            format!("No backend for account: {}", ctx.account_key)
+                        };
+
+                        // Mark as seen locally
+                        if ctx.unseen {
+                            if let Some(env) = active_envelope_mut(app) {
+                                env.unseen = false;
+                                if !env.flags.contains('S') {
+                                    env.flags = sort_flags(&format!("S{}", env.flags));
+                                }
+                            }
+                        }
+
+                        // Transition to MessageRead
+                        app.status = None;
+                        if in_folder_context {
+                            // Take folder state out of current view, put into MessageRead
+                            let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                            let folder_state = match old_view {
+                                View::FolderEnvelopeList(state) => state,
+                                View::MessageRead {
+                                    folder_context: Some(ctx),
+                                    ..
+                                } => *ctx,
+                                _ => unreachable!(),
+                            };
+                            app.view = View::MessageRead {
+                                content,
+                                scroll: 0,
+                                folder_context: Some(Box::new(folder_state)),
+                            };
+                        } else {
+                            app.view = View::MessageRead {
+                                content,
+                                scroll: 0,
+                                folder_context: None,
+                            };
+                        }
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        // Mark as read on server in background
+                        if ctx.unseen {
+                            if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                                if let Ok(id) = ctx.id.parse::<usize>() {
+                                    let seen = Flags::from_iter([Flag::Seen]);
+                                    let _ = backend.add_flags(&ctx.folder, &[id], &seen).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Action::BackToList => {
+                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                    if let View::MessageRead {
+                        folder_context: Some(ctx),
+                        ..
+                    } = old_view
+                    {
+                        app.view = View::FolderEnvelopeList(*ctx);
+                    }
+                    // else: already set to EnvelopeList by the replace
+                }
+                Action::ScrollDown => {
+                    if let View::MessageRead { scroll, .. } = &mut app.view {
+                        *scroll = scroll.saturating_add(1);
+                    }
+                }
+                Action::ScrollUp => {
+                    if let View::MessageRead { scroll, .. } = &mut app.view {
+                        *scroll = scroll.saturating_sub(1);
+                    }
+                }
+                Action::DeleteMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let (id_str, account_key, folder) = (ctx.id, ctx.account_key, ctx.folder);
+                        app.status = Some(Status::Working("Deleting…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let mut error: Option<String> = None;
+                        if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                            if let Ok(id) = id_str.parse::<usize>() {
+                                match backend.delete_messages(&folder, &[id]).await {
+                                    Ok(_) => {
+                                        if in_folder_context {
+                                            // Remove from folder state and go back to folder envelope list
+                                            let old_view = std::mem::replace(
+                                                &mut app.view,
+                                                View::EnvelopeList,
+                                            );
+                                            let mut state = match old_view {
+                                                View::FolderEnvelopeList(s) => s,
+                                                View::MessageRead {
+                                                    folder_context: Some(ctx),
+                                                    ..
+                                                } => *ctx,
+                                                _ => unreachable!(),
+                                            };
+                                            state.remove_envelope(state.selected);
+                                            app.view = View::FolderEnvelopeList(state);
+                                        } else {
+                                            app.remove_envelope(app.selected);
+                                            if !matches!(app.view, View::EnvelopeList) {
+                                                app.view = View::EnvelopeList;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => error = Some(format!("Delete failed: {e}")),
+                                }
+                            }
+                        }
+                        app.status = error.map(Status::Error);
+                    }
+                }
+                Action::ToggleRead => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let label = if ctx.unseen {
+                            "Marking read…"
+                        } else {
+                            "Marking unread…"
+                        };
+                        app.status = Some(Status::Working(label.to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let mut error: Option<String> = None;
                         if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
                             if let Ok(id) = ctx.id.parse::<usize>() {
                                 let seen = Flags::from_iter([Flag::Seen]);
-                                let _ = backend.add_flags(&ctx.folder, &[id], &seen).await;
-                            }
-                        }
-                    }
-                }
-            }
-            Action::BackToList => {
-                let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                if let View::MessageRead {
-                    folder_context: Some(ctx),
-                    ..
-                } = old_view
-                {
-                    app.view = View::FolderEnvelopeList(*ctx);
-                }
-                // else: already set to EnvelopeList by the replace
-            }
-            Action::ScrollDown => {
-                if let View::MessageRead { scroll, .. } = &mut app.view {
-                    *scroll = scroll.saturating_add(1);
-                }
-            }
-            Action::ScrollUp => {
-                if let View::MessageRead { scroll, .. } = &mut app.view {
-                    *scroll = scroll.saturating_sub(1);
-                }
-            }
-            Action::DeleteMessage => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    let (id_str, account_key, folder) = (ctx.id, ctx.account_key, ctx.folder);
-                    app.status = Some(Status::Working("Deleting…".to_string()));
-                    terminal.draw(|frame| ui::render(frame, app))?;
-
-                    let mut error: Option<String> = None;
-                    if let Some((backend, _, _, _)) = backends.get(&account_key) {
-                        if let Ok(id) = id_str.parse::<usize>() {
-                            match backend.delete_messages(&folder, &[id]).await {
-                                Ok(_) => {
-                                    if in_folder_context {
-                                        // Remove from folder state and go back to folder envelope list
-                                        let old_view =
-                                            std::mem::replace(&mut app.view, View::EnvelopeList);
-                                        let mut state = match old_view {
-                                            View::FolderEnvelopeList(s) => s,
-                                            View::MessageRead {
-                                                folder_context: Some(ctx),
-                                                ..
-                                            } => *ctx,
-                                            _ => unreachable!(),
-                                        };
-                                        state.remove_envelope(state.selected);
-                                        app.view = View::FolderEnvelopeList(state);
-                                    } else {
-                                        app.remove_envelope(app.selected);
-                                        if !matches!(app.view, View::EnvelopeList) {
+                                let result = if ctx.unseen {
+                                    backend.add_flags(&ctx.folder, &[id], &seen).await
+                                } else {
+                                    backend.remove_flags(&ctx.folder, &[id], &seen).await
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        if let Some(env) = active_envelope_mut(app) {
+                                            if ctx.unseen {
+                                                env.unseen = false;
+                                                if !env.flags.contains('S') {
+                                                    env.flags =
+                                                        sort_flags(&format!("S{}", env.flags));
+                                                }
+                                            } else {
+                                                env.unseen = true;
+                                                env.flags = env.flags.replace('S', "");
+                                            }
+                                        }
+                                        // If in main MessageRead, go back to list
+                                        if !in_folder_context
+                                            && !matches!(app.view, View::EnvelopeList)
+                                        {
                                             app.view = View::EnvelopeList;
                                         }
                                     }
+                                    Err(e) => error = Some(format!("Toggle read failed: {e}")),
                                 }
-                                Err(e) => error = Some(format!("Delete failed: {e}")),
                             }
                         }
+                        app.status = error.map(Status::Error);
                     }
-                    app.status = error.map(Status::Error);
                 }
-            }
-            Action::ToggleRead => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    let label = if ctx.unseen {
-                        "Marking read…"
-                    } else {
-                        "Marking unread…"
-                    };
-                    app.status = Some(Status::Working(label.to_string()));
-                    terminal.draw(|frame| ui::render(frame, app))?;
+                Action::ToggleFlag => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let label = if ctx.flagged {
+                            "Unflagging…"
+                        } else {
+                            "Flagging…"
+                        };
+                        app.status = Some(Status::Working(label.to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
 
-                    let mut error: Option<String> = None;
-                    if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
-                        if let Ok(id) = ctx.id.parse::<usize>() {
-                            let seen = Flags::from_iter([Flag::Seen]);
-                            let result = if ctx.unseen {
-                                backend.add_flags(&ctx.folder, &[id], &seen).await
-                            } else {
-                                backend.remove_flags(&ctx.folder, &[id], &seen).await
-                            };
-                            match result {
-                                Ok(_) => {
-                                    if let Some(env) = active_envelope_mut(app) {
-                                        if ctx.unseen {
-                                            env.unseen = false;
-                                            if !env.flags.contains('S') {
-                                                env.flags = sort_flags(&format!("S{}", env.flags));
+                        let mut error: Option<String> = None;
+                        if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                            if let Ok(id) = ctx.id.parse::<usize>() {
+                                let flagged = Flags::from_iter([Flag::Flagged]);
+                                let result = if ctx.flagged {
+                                    backend.remove_flags(&ctx.folder, &[id], &flagged).await
+                                } else {
+                                    backend.add_flags(&ctx.folder, &[id], &flagged).await
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        if let Some(env) = active_envelope_mut(app) {
+                                            env.flagged = !ctx.flagged;
+                                            if ctx.flagged {
+                                                env.flags = env.flags.replace('F', "");
+                                            } else if !env.flags.contains('F') {
+                                                env.flags = sort_flags(&format!("F{}", env.flags));
                                             }
-                                        } else {
-                                            env.unseen = true;
-                                            env.flags = env.flags.replace('S', "");
+                                        }
+                                        if !in_folder_context
+                                            && !matches!(app.view, View::EnvelopeList)
+                                        {
+                                            app.view = View::EnvelopeList;
                                         }
                                     }
-                                    // If in main MessageRead, go back to list
-                                    if !in_folder_context && !matches!(app.view, View::EnvelopeList)
-                                    {
-                                        app.view = View::EnvelopeList;
-                                    }
+                                    Err(e) => error = Some(format!("Flag toggle failed: {e}")),
                                 }
-                                Err(e) => error = Some(format!("Toggle read failed: {e}")),
                             }
                         }
+                        app.status = error.map(Status::Error);
                     }
-                    app.status = error.map(Status::Error);
                 }
-            }
-            Action::ToggleFlag => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    let label = if ctx.flagged {
-                        "Unflagging…"
-                    } else {
-                        "Flagging…"
-                    };
-                    app.status = Some(Status::Working(label.to_string()));
+                Action::OpenFolderList => {
+                    app.status = Some(Status::Working("Loading folders…".to_string()));
                     terminal.draw(|frame| ui::render(frame, app))?;
 
+                    let saved_envelope_selected = app.selected;
+                    let mut folders = Vec::new();
+                    let mut sections = Vec::new();
                     let mut error: Option<String> = None;
-                    if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
-                        if let Ok(id) = ctx.id.parse::<usize>() {
-                            let flagged = Flags::from_iter([Flag::Flagged]);
-                            let result = if ctx.flagged {
-                                backend.remove_flags(&ctx.folder, &[id], &flagged).await
-                            } else {
-                                backend.add_flags(&ctx.folder, &[id], &flagged).await
-                            };
-                            match result {
-                                Ok(_) => {
-                                    if let Some(env) = active_envelope_mut(app) {
-                                        env.flagged = !ctx.flagged;
-                                        if ctx.flagged {
-                                            env.flags = env.flags.replace('F', "");
-                                        } else if !env.flags.contains('F') {
-                                            env.flags = sort_flags(&format!("F{}", env.flags));
+
+                    if default_account.is_empty() && backends.len() > 1 {
+                        // Multi-account mode
+                        let mut keys: Vec<String> = backends.keys().cloned().collect();
+                        keys.sort();
+                        for key in &keys {
+                            if let Some((backend, _, _, _)) = backends.get(key) {
+                                match backend.list_folders().await {
+                                    Ok(account_folders) => {
+                                        let start = folders.len();
+                                        let account_folders: Vec<email::folder::Folder> =
+                                            account_folders.into();
+                                        let count = account_folders.len();
+                                        for f in account_folders {
+                                            folders.push(FolderEntry {
+                                                name: f.name,
+                                                account: key.clone(),
+                                            });
                                         }
+                                        sections.push(FolderSection {
+                                            name: key.clone(),
+                                            start,
+                                            count,
+                                        });
                                     }
-                                    if !in_folder_context && !matches!(app.view, View::EnvelopeList)
-                                    {
-                                        app.view = View::EnvelopeList;
+                                    Err(e) => {
+                                        error =
+                                            Some(format!("Error loading folders for {key}: {e}"));
+                                        break;
                                     }
                                 }
-                                Err(e) => error = Some(format!("Flag toggle failed: {e}")),
                             }
                         }
-                    }
-                    app.status = error.map(Status::Error);
-                }
-            }
-            Action::OpenFolderList => {
-                app.status = Some(Status::Working("Loading folders…".to_string()));
-                terminal.draw(|frame| ui::render(frame, app))?;
-
-                let saved_envelope_selected = app.selected;
-                let mut folders = Vec::new();
-                let mut sections = Vec::new();
-                let mut error: Option<String> = None;
-
-                if default_account.is_empty() && backends.len() > 1 {
-                    // Multi-account mode
-                    let mut keys: Vec<String> = backends.keys().cloned().collect();
-                    keys.sort();
-                    for key in &keys {
-                        if let Some((backend, _, _, _)) = backends.get(key) {
+                    } else {
+                        // Single-account mode
+                        let key = if backends.contains_key(default_account) {
+                            default_account.to_string()
+                        } else {
+                            backends.keys().next().cloned().unwrap_or_default()
+                        };
+                        if let Some((backend, _, _, _)) = backends.get(&key) {
                             match backend.list_folders().await {
                                 Ok(account_folders) => {
-                                    let start = folders.len();
-                                    let account_folders: Vec<email::folder::Folder> =
-                                        account_folders.into();
-                                    let count = account_folders.len();
-                                    for f in account_folders {
+                                    for f in account_folders.into_iter() {
                                         folders.push(FolderEntry {
                                             name: f.name,
                                             account: key.clone(),
                                         });
                                     }
-                                    sections.push(FolderSection {
-                                        name: key.clone(),
-                                        start,
-                                        count,
-                                    });
                                 }
                                 Err(e) => {
-                                    error = Some(format!("Error loading folders for {key}: {e}"));
-                                    break;
+                                    error = Some(format!("Error loading folders: {e}"));
                                 }
-                            }
-                        }
-                    }
-                } else {
-                    // Single-account mode
-                    let key = if backends.contains_key(default_account) {
-                        default_account.to_string()
-                    } else {
-                        backends.keys().next().cloned().unwrap_or_default()
-                    };
-                    if let Some((backend, _, _, _)) = backends.get(&key) {
-                        match backend.list_folders().await {
-                            Ok(account_folders) => {
-                                for f in account_folders.into_iter() {
-                                    folders.push(FolderEntry {
-                                        name: f.name,
-                                        account: key.clone(),
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                error = Some(format!("Error loading folders: {e}"));
-                            }
-                        }
-                    }
-                }
-
-                if let Some(err) = error {
-                    app.status = Some(Status::Error(err));
-                } else {
-                    app.status = None;
-                    app.view = View::FolderList(FolderListState {
-                        folders,
-                        sections,
-                        selected: 0,
-                        saved_envelope_selected,
-                    });
-                }
-            }
-            Action::FolderSelectNext => app.folder_select_next(),
-            Action::FolderSelectPrev => app.folder_select_prev(),
-            Action::BackFromFolders => {
-                if let View::FolderList(state) = &app.view {
-                    app.selected = state.saved_envelope_selected;
-                }
-                app.view = View::EnvelopeList;
-            }
-            Action::BackFromFolderEnvelopes => {
-                let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                if let View::FolderEnvelopeList(state) = old_view {
-                    app.view = View::FolderList(state.parent);
-                }
-            }
-            Action::SelectFolder => {
-                // Extract folder info and take the FolderList state
-                let folder_info = if let View::FolderList(state) = &app.view {
-                    state
-                        .folders
-                        .get(state.selected)
-                        .map(|f| (f.name.clone(), f.account.clone()))
-                } else {
-                    None
-                };
-
-                if let Some((folder_name, account_key)) = folder_info {
-                    app.status = Some(Status::Working(format!("Loading {folder_name}…")));
-                    terminal.draw(|frame| ui::render(frame, app))?;
-
-                    // Resolve the backend key
-                    let key = if !account_key.is_empty() {
-                        account_key.clone()
-                    } else if backends.contains_key(default_account) {
-                        default_account.to_string()
-                    } else {
-                        backends.keys().next().cloned().unwrap_or_default()
-                    };
-
-                    let mut error: Option<String> = None;
-                    let mut envelope_data = Vec::new();
-
-                    if let Some((backend, account_config, _, _)) = backends.get(&key) {
-                        let page_size = account_config.get_envelope_list_page_size();
-                        let opts = ListEnvelopesOptions {
-                            page: 0,
-                            page_size,
-                            query: None,
-                        };
-                        match backend.list_envelopes(&folder_name, opts).await {
-                            Ok(envelopes) => {
-                                envelope_data = envelopes.iter().map(EnvelopeData::from).collect();
-                            }
-                            Err(e) => {
-                                error = Some(format!("Error loading envelopes: {e}"));
                             }
                         }
                     }
@@ -727,66 +672,187 @@ async fn run_event_loop(
                         app.status = Some(Status::Error(err));
                     } else {
                         app.status = None;
-                        // Take the FolderListState out and use it as parent
-                        let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                        let parent = if let View::FolderList(state) = old_view {
-                            state
-                        } else {
-                            unreachable!()
-                        };
-                        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
-                            envelopes: envelope_data,
+                        app.view = View::FolderList(FolderListState {
+                            folders,
+                            sections,
                             selected: 0,
-                            folder_name,
-                            account_key: key,
-                            parent,
+                            saved_envelope_selected,
                         });
                     }
                 }
-            }
-            Action::ArchiveMessage => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    let (id_str, account_key, source_folder) =
-                        (ctx.id, ctx.account_key, ctx.folder);
-                    app.status = Some(Status::Working("Archiving…".to_string()));
-                    terminal.draw(|frame| ui::render(frame, app))?;
+                Action::FolderSelectNext => {
+                    if app.search.is_some() {
+                        app.search_select_next();
+                    } else {
+                        app.folder_select_next();
+                    }
+                }
+                Action::FolderSelectPrev => {
+                    if app.search.is_some() {
+                        app.search_select_prev();
+                    } else {
+                        app.folder_select_prev();
+                    }
+                }
+                Action::BackFromFolders => {
+                    if let View::FolderList(state) = &app.view {
+                        app.selected = state.saved_envelope_selected;
+                    }
+                    app.view = View::EnvelopeList;
+                }
+                Action::BackFromFolderEnvelopes => {
+                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                    if let View::FolderEnvelopeList(state) = old_view {
+                        app.view = View::FolderList(state.parent);
+                    }
+                }
+                Action::SelectFolder => {
+                    // Extract folder info and take the FolderList state
+                    let folder_info = if let View::FolderList(state) = &app.view {
+                        state
+                            .folders
+                            .get(state.selected)
+                            .map(|f| (f.name.clone(), f.account.clone()))
+                    } else {
+                        None
+                    };
 
-                    let mut error: Option<String> = None;
-                    if let Some((backend, _, _, archive_folder)) = backends.get(&account_key) {
-                        if let Ok(id) = id_str.parse::<usize>() {
-                            match backend
-                                .move_messages(&source_folder, archive_folder, &[id])
-                                .await
-                            {
-                                Ok(_) => {
-                                    if in_folder_context {
-                                        let old_view =
-                                            std::mem::replace(&mut app.view, View::EnvelopeList);
-                                        let mut state = match old_view {
-                                            View::FolderEnvelopeList(s) => s,
-                                            View::MessageRead {
-                                                folder_context: Some(ctx),
-                                                ..
-                                            } => *ctx,
-                                            _ => unreachable!(),
-                                        };
-                                        state.remove_envelope(state.selected);
-                                        app.view = View::FolderEnvelopeList(state);
-                                    } else {
-                                        app.remove_envelope(app.selected);
-                                        if !matches!(app.view, View::EnvelopeList) {
-                                            app.view = View::EnvelopeList;
-                                        }
-                                    }
+                    if let Some((folder_name, account_key)) = folder_info {
+                        app.status = Some(Status::Working(format!("Loading {folder_name}…")));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        // Resolve the backend key
+                        let key = if !account_key.is_empty() {
+                            account_key.clone()
+                        } else if backends.contains_key(default_account) {
+                            default_account.to_string()
+                        } else {
+                            backends.keys().next().cloned().unwrap_or_default()
+                        };
+
+                        let mut error: Option<String> = None;
+                        let mut envelope_data = Vec::new();
+
+                        if let Some((backend, account_config, _, _)) = backends.get(&key) {
+                            let page_size = account_config.get_envelope_list_page_size();
+                            let opts = ListEnvelopesOptions {
+                                page: 0,
+                                page_size,
+                                query: None,
+                            };
+                            match backend.list_envelopes(&folder_name, opts).await {
+                                Ok(envelopes) => {
+                                    envelope_data =
+                                        envelopes.iter().map(EnvelopeData::from).collect();
                                 }
-                                Err(e) => error = Some(format!("Archive failed: {e}")),
+                                Err(e) => {
+                                    error = Some(format!("Error loading envelopes: {e}"));
+                                }
                             }
                         }
+
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        } else {
+                            app.status = None;
+                            // Take the FolderListState out and use it as parent
+                            let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                            let parent = if let View::FolderList(state) = old_view {
+                                state
+                            } else {
+                                unreachable!()
+                            };
+                            app.view = View::FolderEnvelopeList(FolderEnvelopeState {
+                                envelopes: envelope_data,
+                                selected: 0,
+                                folder_name,
+                                account_key: key,
+                                parent,
+                            });
+                        }
                     }
-                    app.status = error.map(Status::Error);
+                }
+                Action::StartSearch => {
+                    app.start_search();
+                }
+                Action::SearchChar(c) => {
+                    app.search_push_char(c);
+                }
+                Action::SearchBackspace => {
+                    app.search_pop_char();
+                }
+                Action::SearchConfirm => {
+                    let follow_up = match &app.view {
+                        View::EnvelopeList | View::FolderEnvelopeList(_) => {
+                            Some(Action::ReadMessage)
+                        }
+                        View::FolderList(_) => Some(Action::SelectFolder),
+                        _ => None,
+                    };
+                    if app.confirm_search() {
+                        if let Some(next_action) = follow_up {
+                            action = next_action;
+                            clear_search_after = true;
+                            continue;
+                        }
+                    }
+                    // Clear search if no follow-up (e.g. empty results already cleared)
+                    app.cancel_search();
+                }
+                Action::SearchCancel => {
+                    app.cancel_search();
+                }
+                Action::ArchiveMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let (id_str, account_key, source_folder) =
+                            (ctx.id, ctx.account_key, ctx.folder);
+                        app.status = Some(Status::Working("Archiving…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let mut error: Option<String> = None;
+                        if let Some((backend, _, _, archive_folder)) = backends.get(&account_key) {
+                            if let Ok(id) = id_str.parse::<usize>() {
+                                match backend
+                                    .move_messages(&source_folder, archive_folder, &[id])
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        if in_folder_context {
+                                            let old_view = std::mem::replace(
+                                                &mut app.view,
+                                                View::EnvelopeList,
+                                            );
+                                            let mut state = match old_view {
+                                                View::FolderEnvelopeList(s) => s,
+                                                View::MessageRead {
+                                                    folder_context: Some(ctx),
+                                                    ..
+                                                } => *ctx,
+                                                _ => unreachable!(),
+                                            };
+                                            state.remove_envelope(state.selected);
+                                            app.view = View::FolderEnvelopeList(state);
+                                        } else {
+                                            app.remove_envelope(app.selected);
+                                            if !matches!(app.view, View::EnvelopeList) {
+                                                app.view = View::EnvelopeList;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => error = Some(format!("Archive failed: {e}")),
+                                }
+                            }
+                        }
+                        app.status = error.map(Status::Error);
+                    }
                 }
             }
-        }
+
+            if clear_search_after {
+                app.cancel_search();
+            }
+            break;
+        } // end inner action loop
 
         if app.should_quit {
             break;

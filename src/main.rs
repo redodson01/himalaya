@@ -45,12 +45,30 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut printer = StdoutPrinter::new(cli.output);
     let res = match cli.command {
-        Some(cmd) => cmd.execute(&mut printer, cli.config_paths.as_ref()).await,
-        None => {
-            let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
-            EnvelopeListCommand::default()
-                .execute(&mut printer, &config)
+        Some(cmd) => {
+            cmd.execute(&mut printer, cli.config_paths.as_ref(), cli.all)
                 .await
+        }
+        None => {
+            if cli.all {
+                let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
+                let mut account_names: Vec<&String> = config.accounts.keys().collect();
+                account_names.sort();
+                for name in &account_names {
+                    println!("--- {} ---", name);
+                    let mut cmd = EnvelopeListCommand::default();
+                    cmd.account.name = Some(name.to_string());
+                    if let Err(e) = cmd.execute(&mut printer, &config).await {
+                        eprintln!("Error for account {}: {}", name, e);
+                    }
+                }
+                Ok(())
+            } else {
+                let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
+                EnvelopeListCommand::default()
+                    .execute(&mut printer, &config)
+                    .await
+            }
         }
     };
 

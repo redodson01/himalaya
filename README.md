@@ -52,6 +52,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
 - **Sendmail** backend (requires `sendmail` feature)
 - Global system **keyring** for secret management (requires `keyring` feature)
 - **OAuth 2.0** authorization flow (requires `oauth2` feature)
+- **All-accounts mode** via `--all` (or `HIMALAYA_ALL=1`): run listing commands (`envelope list`, `envelope thread`, `folder list`) across all configured accounts at once, with per-account headers
 - **JSON** output via `--output json`
 - **PGP** encryption:
   - via shell commands (requires `pgp-commands` feature)

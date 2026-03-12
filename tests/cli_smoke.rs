@@ -90,3 +90,45 @@ fn folder_help() {
         .success()
         .stdout(predicate::str::contains("folder"));
 }
+
+#[test]
+fn all_flag_in_help() {
+    himalaya()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--all"));
+}
+
+#[test]
+fn all_with_account_fails() {
+    himalaya()
+        .args(["--all", "envelope", "list", "--account", "foo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--all and --account are mutually exclusive",
+        ));
+}
+
+#[test]
+fn all_with_subcommand_message_read_fails() {
+    himalaya()
+        .args(["--all", "message", "read", "1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--all can only be used with listing commands",
+        ));
+}
+
+#[test]
+fn all_with_mutating_command_fails() {
+    himalaya()
+        .args(["--all", "folder", "add", "test-folder"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--all can only be used with listing commands",
+        ));
+}

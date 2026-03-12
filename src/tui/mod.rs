@@ -534,10 +534,7 @@ async fn handle_compose(
     };
 
     if std::env::var("EDITOR").is_err() {
-        app.status = Some(Status::Error(
-            "EDITOR environment variable is not set".to_string(),
-        ));
-        return Ok(());
+        std::env::set_var("EDITOR", "vi");
     }
 
     // Suspend TUI
@@ -640,10 +637,7 @@ async fn handle_edit_message(
     };
 
     if std::env::var("EDITOR").is_err() {
-        app.status = Some(Status::Error(
-            "EDITOR environment variable is not set".to_string(),
-        ));
-        return Ok(());
+        std::env::set_var("EDITOR", "vi");
     }
 
     // Suspend TUI

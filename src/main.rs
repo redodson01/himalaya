@@ -46,6 +46,10 @@ async fn main() -> Result<()> {
     let mut printer = StdoutPrinter::new(cli.output);
     let res = match cli.command {
         Some(mut cmd) => {
+            #[cfg(feature = "tui")]
+            if cli.tui {
+                color_eyre::eyre::bail!("--tui cannot be used with subcommands");
+            }
             if let Some(name) = cli.account {
                 cmd.set_account(name);
             }
@@ -53,6 +57,10 @@ async fn main() -> Result<()> {
                 .await
         }
         None => {
+            #[cfg(feature = "tui")]
+            if cli.tui {
+                return himalaya::tui::run(cli.config_paths.as_ref(), cli.all, cli.account).await;
+            }
             if cli.all {
                 let config = TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
                 let mut account_names: Vec<&String> = config.accounts.keys().collect();

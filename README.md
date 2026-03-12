@@ -34,6 +34,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
   - [Outlook](#outlook)
   - [iCloud Mail](#icloud-mail)
 - [Interfaces](#interfaces)
+- [TUI Key Bindings](#tui-key-bindings)
 - [FAQ](#faq)
 - [Testing](#testing)
 - [Social](#social)
@@ -522,6 +523,36 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 - [jns/himalaya](https://www.raycast.com/jns/himalaya): Raycast extension
 - [openclaw/openclaw](https://github.com/openclaw/openclaw/blob/main/skills/himalaya/SKILL.md): OpenClaw SKILL
 - [parisni/dfzf](https://github.com/parisni/dfzf): dfzf integration
+
+## TUI Key Bindings
+
+The interactive TUI mode (`--tui`) supports the following key bindings:
+
+### Envelope list
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Quit |
+| `j` / `Down` | Select next envelope |
+| `k` / `Up` | Select previous envelope |
+| `Enter` | Read selected message |
+| `r` | Toggle read/unread |
+| `f` | Toggle flagged |
+| `d` | Delete message |
+| `a` | Archive message |
+
+### Message view
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `b` | Back to envelope list |
+| `j` / `Down` | Scroll down |
+| `k` / `Up` | Scroll up |
+| `n` | Open next message |
+| `r` | Toggle read/unread |
+| `f` | Toggle flagged |
+| `d` | Delete message |
+| `a` | Archive message |
 
 ## FAQ
 

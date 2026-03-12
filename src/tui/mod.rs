@@ -13,14 +13,18 @@ use email::{
     envelope::list::ListEnvelopesOptions,
     flag::{Flag, Flags},
     folder::list::ListFolders,
+    message::Message,
 };
-use pimalaya_tui::{himalaya::backend::BackendBuilder, terminal::config::TomlConfig as _};
+use pimalaya_tui::{
+    himalaya::{backend::BackendBuilder, editor},
+    terminal::{cli::printer::StdoutPrinter, config::TomlConfig as _},
+};
 
 use crate::config::TomlConfig;
 
 use self::app::{
-    sort_flags, AccountSection, App, EnvelopeData, FolderEntry, FolderEnvelopeState,
-    FolderListState, FolderSection, MoveFolderPickerState, Status, View,
+    sort_flags, AccountPickerState, AccountSection, App, EnvelopeData, FolderEntry,
+    FolderEnvelopeState, FolderListState, FolderSection, MoveFolderPickerState, Status, View,
 };
 use self::event::{handle_event, Action};
 
@@ -113,7 +117,13 @@ async fn run_single_account(config: TomlConfig, account: Option<String>) -> Resu
     let mut backends = HashMap::new();
     backends.insert(
         account_name.clone(),
-        (backend, account_config, folder.clone(), archive_folder),
+        (
+            backend,
+            account_config,
+            folder.clone(),
+            archive_folder,
+            toml_account_config,
+        ),
     );
 
     run_event_loop(&mut terminal, &mut app, &backends, &account_name).await
@@ -141,8 +151,10 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                 let toml_account_config = Arc::new(toml_account_config);
                 let account_config = Arc::new(account_config);
 
-                let backend =
-                    BackendBuilder::new(toml_account_config, account_config.clone(), |builder| {
+                let backend = BackendBuilder::new(
+                    toml_account_config.clone(),
+                    account_config.clone(),
+                    |builder| {
                         builder
                             .without_features()
                             .with_list_envelopes(BackendFeatureSource::Context)
@@ -152,10 +164,11 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                             .with_remove_flags(BackendFeatureSource::Context)
                             .with_delete_messages(BackendFeatureSource::Context)
                             .with_move_messages(BackendFeatureSource::Context)
-                    })
-                    .without_sending_backend()
-                    .build()
-                    .await?;
+                    },
+                )
+                .without_sending_backend()
+                .build()
+                .await?;
 
                 let acct_folder = account_config.get_inbox_folder_alias();
                 let archive_folder = account_config.get_folder_alias("archive");
@@ -174,6 +187,7 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                     acct_folder,
                     archive_folder,
                     envelopes,
+                    toml_account_config,
                 ))
             }
             .await;
@@ -186,7 +200,17 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
     // Await handles in order to preserve sorted account ordering
     for handle in handles {
         match handle.await {
-            Ok((name, Ok((backend, account_config, acct_folder, archive_folder, envelopes)))) => {
+            Ok((
+                name,
+                Ok((
+                    backend,
+                    account_config,
+                    acct_folder,
+                    archive_folder,
+                    envelopes,
+                    toml_account_config,
+                )),
+            )) => {
                 if folder == "INBOX" && !acct_folder.is_empty() {
                     folder = acct_folder.clone();
                 }
@@ -206,7 +230,16 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
                     count,
                 });
 
-                backends.insert(name, (backend, account_config, acct_folder, archive_folder));
+                backends.insert(
+                    name,
+                    (
+                        backend,
+                        account_config,
+                        acct_folder,
+                        archive_folder,
+                        toml_account_config,
+                    ),
+                );
             }
             Ok((name, Err(e))) => {
                 eprintln!("Error loading account {}: {}", name, e);
@@ -234,6 +267,7 @@ type BackendMap = HashMap<
         Arc<email::account::config::AccountConfig>,
         String, // source folder
         String, // archive folder
+        Arc<crate::account::config::TomlAccountConfig>,
     ),
 >;
 
@@ -256,6 +290,7 @@ struct EnvelopeContext {
     id: String,
     unseen: bool,
     flagged: bool,
+    is_draft: bool,
     account_key: String,
     folder: String,
 }
@@ -272,6 +307,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
                     id: env.id.clone(),
                     unseen: env.unseen,
                     flagged: env.flagged,
+                    is_draft: env.flags.contains('T'),
                     account_key: state.account_key.clone(),
                     folder: state.folder_name.clone(),
                 })
@@ -283,6 +319,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
             id: env.id.clone(),
             unseen: env.unseen,
             flagged: env.flagged,
+            is_draft: env.flags.contains('T'),
             account_key: ctx.account_key.clone(),
             folder: ctx.folder_name.clone(),
         }),
@@ -292,6 +329,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
                 id: env.id.clone(),
                 unseen: env.unseen,
                 flagged: env.flagged,
+                is_draft: env.flags.contains('T'),
                 account_key,
                 folder: app.folder.clone(),
             }
@@ -327,7 +365,7 @@ async fn refresh_envelope_list(
     keys.sort();
 
     for key in &keys {
-        if let Some((backend, account_config, folder, _)) = backends.get(key) {
+        if let Some((backend, account_config, folder, _, _)) = backends.get(key) {
             let page_size = account_config.get_envelope_list_page_size();
             let opts = ListEnvelopesOptions {
                 page: 0,
@@ -366,6 +404,276 @@ async fn refresh_envelope_list(
         app.selected = 0;
     }
     app.status = None;
+}
+
+enum ComposeKind {
+    New,
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+async fn build_compose_backend(
+    toml_account_config: &Arc<crate::account::config::TomlAccountConfig>,
+    account_config: &Arc<email::account::config::AccountConfig>,
+) -> Result<pimalaya_tui::himalaya::backend::Backend> {
+    BackendBuilder::new(
+        toml_account_config.clone(),
+        account_config.clone(),
+        |builder| {
+            builder
+                .without_features()
+                .with_add_message(BackendFeatureSource::Context)
+                .with_send_message(BackendFeatureSource::Context)
+        },
+    )
+    .build()
+    .await
+}
+
+async fn handle_compose(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    default_account: &str,
+    kind: ComposeKind,
+    account_override: Option<&str>,
+) -> Result<()> {
+    // Determine account key and envelope context
+    let (account_key, envelope_id, folder) = match kind {
+        ComposeKind::New => {
+            let mut key = if let Some(ovr) = account_override {
+                ovr.to_string()
+            } else {
+                account_key_for(app, default_account)
+            };
+            // If key doesn't match a backend (e.g. empty list in multi-account),
+            // fall back to the first available account.
+            if !backends.contains_key(&key) {
+                key = backends.keys().min().cloned().unwrap_or_default();
+            }
+            let folder = backends
+                .get(&key)
+                .map(|(_, _, f, _, _)| f.clone())
+                .unwrap_or_default();
+            (key, None, folder)
+        }
+        _ => {
+            if let Some(ctx) = active_envelope_context(app, default_account) {
+                let id: Option<usize> = ctx.id.parse().ok();
+                (ctx.account_key, id, ctx.folder)
+            } else {
+                app.status = Some(Status::Error("No message selected".to_string()));
+                return Ok(());
+            }
+        }
+    };
+
+    let Some((backend, account_config, _, _, toml_account_config)) = backends.get(&account_key)
+    else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
+    let status_msg = match kind {
+        ComposeKind::New => "Composing…",
+        ComposeKind::Reply => "Preparing reply…",
+        ComposeKind::ReplyAll => "Preparing reply all…",
+        ComposeKind::Forward => "Preparing forward…",
+    };
+    app.status = Some(Status::Working(status_msg.to_string()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    // Build a send-capable backend
+    let compose_backend = match build_compose_backend(toml_account_config, account_config).await {
+        Ok(b) => b,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Compose setup failed: {e}")));
+            return Ok(());
+        }
+    };
+
+    // Build the template
+    let tpl = match kind {
+        ComposeKind::New => {
+            Message::new_tpl_builder(account_config.clone())
+                .build()
+                .await
+        }
+        ComposeKind::Reply | ComposeKind::ReplyAll => {
+            let id = envelope_id.ok_or_else(|| color_eyre::eyre::eyre!("Invalid envelope ID"))?;
+            let msgs = backend.get_messages(&folder, &[id]).await?;
+            let msg = msgs
+                .first()
+                .ok_or_else(|| color_eyre::eyre::eyre!("Cannot find message {id}"))?;
+            msg.to_reply_tpl_builder(account_config.clone())
+                .with_reply_all(matches!(kind, ComposeKind::ReplyAll))
+                .build()
+                .await
+        }
+        ComposeKind::Forward => {
+            let id = envelope_id.ok_or_else(|| color_eyre::eyre::eyre!("Invalid envelope ID"))?;
+            let msgs = backend.get_messages(&folder, &[id]).await?;
+            let msg = msgs
+                .first()
+                .ok_or_else(|| color_eyre::eyre::eyre!("Cannot find message {id}"))?;
+            msg.to_forward_tpl_builder(account_config.clone())
+                .build()
+                .await
+        }
+    };
+
+    let tpl = match tpl {
+        Ok(t) => t,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Template error: {e}")));
+            return Ok(());
+        }
+    };
+
+    if std::env::var("EDITOR").is_err() {
+        std::env::set_var("EDITOR", "vi");
+    }
+
+    // Suspend TUI
+    ratatui::restore();
+
+    // Run editor flow
+    let mut printer = StdoutPrinter::default();
+    let editor_result =
+        editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
+            .await;
+
+    // Restore TUI
+    *terminal = ratatui::init();
+
+    match editor_result {
+        Ok(()) => {
+            // For reply/reply-all, add Answered flag
+            if matches!(kind, ComposeKind::Reply | ComposeKind::ReplyAll) {
+                if let Some(id) = envelope_id {
+                    let _ = backend.add_flag(&folder, &[id], Flag::Answered).await;
+                }
+            }
+            // Refresh envelope list
+            refresh_envelope_list(app, backends, terminal).await;
+        }
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Editor error: {e}")));
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_edit_message(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    default_account: &str,
+) -> Result<()> {
+    let ctx = match active_envelope_context(app, default_account) {
+        Some(ctx) => ctx,
+        None => {
+            app.status = Some(Status::Error("No message selected".to_string()));
+            return Ok(());
+        }
+    };
+
+    let (id_str, account_key, folder, is_draft) =
+        (ctx.id, ctx.account_key, ctx.folder, ctx.is_draft);
+
+    let Some((backend, account_config, _, _, toml_account_config)) = backends.get(&account_key)
+    else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
+    let id: usize = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            app.status = Some(Status::Error(format!("Invalid envelope ID: {id_str}")));
+            return Ok(());
+        }
+    };
+
+    app.status = Some(Status::Working("Editing…".to_string()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    // Fetch message and build editable template
+    let tpl = match backend.get_messages(&folder, &[id]).await {
+        Ok(msgs) => match msgs.first() {
+            Some(msg) => msg.to_read_tpl(account_config, |tpl| tpl).await,
+            None => {
+                app.status = Some(Status::Error(format!("Cannot find message {id}")));
+                return Ok(());
+            }
+        },
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Fetch failed: {e}")));
+            return Ok(());
+        }
+    };
+
+    let tpl = match tpl {
+        Ok(t) => t,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Template error: {e}")));
+            return Ok(());
+        }
+    };
+
+    // Build a send-capable backend
+    let compose_backend = match build_compose_backend(toml_account_config, account_config).await {
+        Ok(b) => b,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Compose setup failed: {e}")));
+            return Ok(());
+        }
+    };
+
+    if std::env::var("EDITOR").is_err() {
+        std::env::set_var("EDITOR", "vi");
+    }
+
+    // Suspend TUI
+    ratatui::restore();
+
+    // Run editor flow
+    let mut printer = StdoutPrinter::default();
+    let editor_result =
+        editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
+            .await;
+
+    // Restore TUI
+    *terminal = ratatui::init();
+
+    match editor_result {
+        Ok(()) => {
+            // Delete the original draft from the server. This runs for all
+            // editor exits (send, save-as-remote-draft, discard) because
+            // edit_tpl_with_editor returns Ok(()) for all of them.
+            //
+            // Known edge case: if a stale *local* draft exists from an
+            // unrelated compose, the editor's pre-edit prompt may lead to
+            // the original remote draft being deleted even though the user
+            // never actually edited it. This is a limitation of pimalaya-tui's
+            // single shared local draft file.
+            if is_draft {
+                let _ = backend.delete_messages(&folder, &[id]).await;
+            }
+            refresh_envelope_list(app, backends, terminal).await;
+        }
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Editor error: {e}")));
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_event_loop(
@@ -455,7 +763,7 @@ async fn run_event_loop(
                         app.status = Some(Status::Working("Loading…".to_string()));
                         terminal.draw(|frame| ui::render(frame, app))?;
 
-                        let content = if let Some((backend, account_config, _, _)) =
+                        let content = if let Some((backend, account_config, _, _, _)) =
                             backends.get(&ctx.account_key)
                         {
                             match ctx.id.parse::<usize>() {
@@ -520,7 +828,7 @@ async fn run_event_loop(
 
                         // Mark as read on server in background
                         if ctx.unseen {
-                            if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                            if let Some((backend, _, _, _, _)) = backends.get(&ctx.account_key) {
                                 if let Ok(id) = ctx.id.parse::<usize>() {
                                     let seen = Flags::from_iter([Flag::Seen]);
                                     let _ = backend.add_flags(&ctx.folder, &[id], &seen).await;
@@ -559,7 +867,7 @@ async fn run_event_loop(
                         terminal.draw(|frame| ui::render(frame, app))?;
 
                         let mut error: Option<String> = None;
-                        if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                        if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
                             if let Ok(id) = id_str.parse::<usize>() {
                                 match backend.delete_messages(&folder, &[id]).await {
                                     Ok(_) => {
@@ -604,7 +912,7 @@ async fn run_event_loop(
                         terminal.draw(|frame| ui::render(frame, app))?;
 
                         let mut error: Option<String> = None;
-                        if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                        if let Some((backend, _, _, _, _)) = backends.get(&ctx.account_key) {
                             if let Ok(id) = ctx.id.parse::<usize>() {
                                 let seen = Flags::from_iter([Flag::Seen]);
                                 let result = if ctx.unseen {
@@ -651,7 +959,7 @@ async fn run_event_loop(
                         terminal.draw(|frame| ui::render(frame, app))?;
 
                         let mut error: Option<String> = None;
-                        if let Some((backend, _, _, _)) = backends.get(&ctx.account_key) {
+                        if let Some((backend, _, _, _, _)) = backends.get(&ctx.account_key) {
                             if let Ok(id) = ctx.id.parse::<usize>() {
                                 let flagged = Flags::from_iter([Flag::Flagged]);
                                 let result = if ctx.flagged {
@@ -694,7 +1002,7 @@ async fn run_event_loop(
                     let mut keys: Vec<String> = backends.keys().cloned().collect();
                     keys.sort();
                     for key in &keys {
-                        if let Some((backend, _, _, _)) = backends.get(key) {
+                        if let Some((backend, _, _, _, _)) = backends.get(key) {
                             match backend.list_folders().await {
                                 Ok(account_folders) => {
                                     let start = folders.len();
@@ -798,7 +1106,7 @@ async fn run_event_loop(
                         let mut error: Option<String> = None;
                         let mut envelope_data = Vec::new();
 
-                        if let Some((backend, account_config, _, _)) = backends.get(&key) {
+                        if let Some((backend, account_config, _, _, _)) = backends.get(&key) {
                             let page_size = account_config.get_envelope_list_page_size();
                             let opts = ListEnvelopesOptions {
                                 page: 0,
@@ -876,7 +1184,8 @@ async fn run_event_loop(
                         terminal.draw(|frame| ui::render(frame, app))?;
 
                         let mut error: Option<String> = None;
-                        if let Some((backend, _, _, archive_folder)) = backends.get(&account_key) {
+                        if let Some((backend, _, _, archive_folder, _)) = backends.get(&account_key)
+                        {
                             if let Ok(id) = id_str.parse::<usize>() {
                                 match backend
                                     .move_messages(&source_folder, archive_folder, &[id])
@@ -936,7 +1245,7 @@ async fn run_event_loop(
                         let mut folders = Vec::new();
                         let mut error: Option<String> = None;
 
-                        if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                        if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
                             match backend.list_folders().await {
                                 Ok(account_folders) => {
                                     let account_folders: Vec<email::folder::Folder> =
@@ -1008,7 +1317,7 @@ async fn run_event_loop(
                             terminal.draw(|frame| ui::render(frame, app))?;
 
                             let mut error: Option<String> = None;
-                            if let Some((backend, _, _, _)) = backends.get(&account_key) {
+                            if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
                                 if let Ok(id) = id_str.parse::<usize>() {
                                     match backend
                                         .move_messages(&source_folder, &target_name, &[id])
@@ -1053,6 +1362,97 @@ async fn run_event_loop(
                             }
                         }
                     }
+                }
+                Action::EditMessage => {
+                    handle_edit_message(app, terminal, backends, default_account)
+                        .await
+                        .ok();
+                }
+                Action::ComposeMessage => {
+                    if backends.len() > 1 {
+                        let mut accounts: Vec<String> = backends.keys().cloned().collect();
+                        accounts.sort();
+                        let previous_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                        app.view = View::AccountPicker(AccountPickerState {
+                            accounts,
+                            selected: 0,
+                            previous_view: Box::new(previous_view),
+                        });
+                    } else {
+                        handle_compose(
+                            app,
+                            terminal,
+                            backends,
+                            default_account,
+                            ComposeKind::New,
+                            None,
+                        )
+                        .await
+                        .ok();
+                    }
+                }
+                Action::ConfirmAccountPicker => {
+                    if let View::AccountPicker(state) =
+                        std::mem::replace(&mut app.view, View::EnvelopeList)
+                    {
+                        if let Some(account_key) = state.accounts.get(state.selected) {
+                            let key = account_key.clone();
+                            app.view = *state.previous_view;
+                            handle_compose(
+                                app,
+                                terminal,
+                                backends,
+                                default_account,
+                                ComposeKind::New,
+                                Some(&key),
+                            )
+                            .await
+                            .ok();
+                        }
+                    }
+                }
+                Action::CancelAccountPicker => {
+                    if let View::AccountPicker(state) =
+                        std::mem::replace(&mut app.view, View::EnvelopeList)
+                    {
+                        app.view = *state.previous_view;
+                    }
+                }
+                Action::ReplyMessage => {
+                    handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::Reply,
+                        None,
+                    )
+                    .await
+                    .ok();
+                }
+                Action::ReplyAllMessage => {
+                    handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::ReplyAll,
+                        None,
+                    )
+                    .await
+                    .ok();
+                }
+                Action::ForwardMessage => {
+                    handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::Forward,
+                        None,
+                    )
+                    .await
+                    .ok();
                 }
             }
 

@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::tui::app::{
-    App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection, MoveFolderPickerState,
-    Status, View,
+    AccountPickerState, App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection,
+    MoveFolderPickerState, Status, View,
 };
 
 const FROM_COLOR: Color = Color::Cyan;
@@ -122,6 +122,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         View::FolderEnvelopeList(state) => render_folder_envelope_list(frame, state, app),
         View::MoveFolderPicker(state) => render_move_folder_picker(frame, state, app),
+        View::AccountPicker(state) => render_account_picker(frame, state, app),
     }
 }
 
@@ -140,6 +141,22 @@ fn toggle_labels(env: Option<&EnvelopeData>) -> (&'static str, &'static str) {
     } else {
         (": mark read/unread | ", ": flag/unflag")
     }
+}
+
+/// Build the compose hints line shown on the second row of the bottom bar.
+fn compose_hints_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled(" E", Style::default().fg(Color::Yellow)),
+        Span::raw(": edit | "),
+        Span::styled("N", Style::default().fg(Color::Yellow)),
+        Span::raw(": new | "),
+        Span::styled("R", Style::default().fg(Color::Yellow)),
+        Span::raw(": reply | "),
+        Span::styled("A", Style::default().fg(Color::Yellow)),
+        Span::raw(": reply all | "),
+        Span::styled("F", Style::default().fg(Color::Yellow)),
+        Span::raw(": forward"),
+    ])
 }
 
 /// Renders the flag legend (Seen Flagged Answered Deleted drafT) into the
@@ -196,7 +213,7 @@ fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &Ap
 }
 
 fn render_envelope_list(frame: &mut Frame, app: &App) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
     let searching = app.search.is_some();
     let matched_indices = app.search.as_ref().map(|s| &s.matched_indices[..]);
@@ -285,9 +302,11 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
     if !render_search_bottom(frame, chunks[1], app) {
+        let rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
         let chunks_bottom =
             Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[1]);
+                .split(rows[0]);
 
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
@@ -326,6 +345,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
         render_flag_legend(frame, chunks_bottom[1]);
+        frame.render_widget(Paragraph::new(compose_hints_line()), rows[1]);
     }
 }
 
@@ -432,7 +452,7 @@ fn render_folder_list(
 }
 
 fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState, app: &App) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
     let searching = app.search.is_some();
     let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
@@ -487,9 +507,11 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
     if !render_search_bottom(frame, chunks[1], app) {
+        let rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
         let chunks_bottom =
             Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(chunks[1]);
+                .split(rows[0]);
 
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
@@ -526,6 +548,7 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
         };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
         render_flag_legend(frame, chunks_bottom[1]);
+        frame.render_widget(Paragraph::new(compose_hints_line()), rows[1]);
     }
 }
 
@@ -609,6 +632,76 @@ fn render_move_folder_picker(frame: &mut Frame, state: &MoveFolderPickerState, a
     }
 }
 
+fn render_account_picker(frame: &mut Frame, state: &AccountPickerState, app: &App) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+
+    let searching = app.search.is_some();
+    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
+
+    let visible_indices: Vec<usize> = match app.search.as_ref() {
+        Some(s) => s.matched_indices.clone(),
+        None => (0..state.accounts.len()).collect(),
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut item_to_table_row: Vec<usize> = Vec::new();
+
+    if !visible_indices.is_empty() {
+        rows.push(Row::new([Cell::from("")]));
+    }
+
+    for &i in visible_indices.iter() {
+        item_to_table_row.push(rows.len());
+        rows.push(Row::new([Cell::from(format!("  {}", state.accounts[i]))]));
+    }
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .column_spacing(0)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Compose: Select Account "),
+        );
+
+    let highlight_pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == state.selected)
+            .unwrap_or(0)
+    };
+    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let mut table_state = TableState::default().with_selected(Some(table_selected));
+    frame.render_stateful_widget(table, chunks[0], &mut table_state);
+
+    if !render_search_bottom(frame, chunks[1], app) {
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": cancel | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": select | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
+        };
+        frame.render_widget(Paragraph::new(status_line), chunks[1]);
+    }
+}
+
 fn render_message(
     frame: &mut Frame,
     content: &str,
@@ -616,7 +709,7 @@ fn render_message(
     app: &App,
     active_env: Option<&EnvelopeData>,
 ) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
     // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
     // Headers only appear before the first blank line.
@@ -664,9 +757,9 @@ fn render_message(
 
     frame.render_widget(paragraph, chunks[0]);
 
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(chunks[1]);
     let chunks_bottom =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(chunks[1]);
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).split(rows[0]);
 
     let status_line = if let Some(s) = &app.status {
         let (msg, color) = match s {
@@ -701,6 +794,7 @@ fn render_message(
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
     render_flag_legend(frame, chunks_bottom[1]);
+    frame.render_widget(Paragraph::new(compose_hints_line()), rows[1]);
 }
 
 /// Check if a line looks like an email header (e.g. "From: ...", "Subject: ...").

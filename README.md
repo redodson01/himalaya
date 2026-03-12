@@ -53,7 +53,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
 - **Sendmail** backend (requires `sendmail` feature)
 - Global system **keyring** for secret management (requires `keyring` feature)
 - **OAuth 2.0** authorization flow (requires `oauth2` feature)
-- **Interactive TUI** mode via `--tui` (or `HIMALAYA_TUI=1`): browse envelopes and read messages in a full-screen terminal interface using [ratatui](https://ratatui.rs) (requires `tui` feature)
+- **Interactive TUI** mode via `--tui` (or `HIMALAYA_TUI=1`): browse envelopes and read messages in a full-screen terminal interface using [ratatui](https://ratatui.rs). Use with `-a <NAME>` to target a specific account
 - **All-accounts mode** via `--all` (or `HIMALAYA_ALL=1`): run listing commands (`envelope list`, `envelope thread`, `folder list`) across all configured accounts at once, with per-account headers. Also works with `--tui` to show stacked account sections
 - **JSON** output via `--output json`
 - **PGP** encryption:
@@ -540,6 +540,12 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `m` | Move message to folder |
+| `E` | Edit message (delete draft on send) |
+| `N` | Compose new message (account picker in multi-account mode) |
+| `R` | Reply to message |
+| `A` | Reply all |
+| `F` | Forward message |
 | `\` | Open folder list |
 | `/` | Search / filter list |
 
@@ -565,6 +571,12 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `m` | Move message to folder |
+| `E` | Edit message (delete draft on send) |
+| `N` | Compose new message (account picker in multi-account mode) |
+| `R` | Reply to message |
+| `A` | Reply all |
+| `F` | Forward message |
 | `/` | Search / filter list |
 
 ### Message view
@@ -579,6 +591,32 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `f` | Toggle flagged |
 | `d` | Delete message |
 | `a` | Archive message |
+| `m` | Move message to folder |
+| `E` | Edit message (delete draft on send) |
+| `N` | Compose new message (account picker in multi-account mode) |
+| `R` | Reply to message |
+| `A` | Reply all |
+| `F` | Forward message |
+
+### Move folder picker
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Cancel and go back |
+| `j` / `Down` | Select next folder |
+| `k` / `Up` | Select previous folder |
+| `Enter` | Move message to selected folder |
+| `/` | Search / filter list |
+
+### Account picker (multi-account compose)
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Cancel and go back |
+| `j` / `Down` | Select next account |
+| `k` / `Up` | Select previous account |
+| `Enter` | Compose from selected account |
+| `/` | Search / filter list |
 
 ## FAQ
 

@@ -16,7 +16,7 @@ use pimalaya_tui::{himalaya::backend::BackendBuilder, terminal::config::TomlConf
 
 use crate::config::TomlConfig;
 
-use self::app::{sort_flags, App, EnvelopeData, View};
+use self::app::{sort_flags, App, EnvelopeData, Status, View};
 use self::event::{handle_event, Action};
 
 /// Drop guard that restores the terminal on exit (including panics).
@@ -47,6 +47,8 @@ pub async fn run(config_paths: &[PathBuf], _all: bool, _account: Option<String>)
                 .with_list_envelopes(BackendFeatureSource::Context)
                 .with_get_messages(BackendFeatureSource::Context)
                 .with_add_flags(BackendFeatureSource::Context)
+                .with_delete_messages(BackendFeatureSource::Context)
+                .with_move_messages(BackendFeatureSource::Context)
         },
     )
     .without_sending_backend()
@@ -54,6 +56,7 @@ pub async fn run(config_paths: &[PathBuf], _all: bool, _account: Option<String>)
     .await?;
 
     let folder = account_config.get_inbox_folder_alias();
+    let archive_folder = account_config.get_folder_alias("archive");
 
     let page_size = account_config.get_envelope_list_page_size();
     let opts = ListEnvelopesOptions {
@@ -135,6 +138,48 @@ pub async fn run(config_paths: &[PathBuf], _all: bool, _account: Option<String>)
             Action::ScrollUp => {
                 if let View::MessageRead { scroll, .. } = &mut app.view {
                     *scroll = scroll.saturating_sub(1);
+                }
+            }
+            Action::DeleteMessage => {
+                if let Some(env) = app.envelopes.get(app.selected) {
+                    let id_str = env.id.clone();
+                    if let Ok(id) = id_str.parse::<usize>() {
+                        app.status = Some(Status::Working("Deleting...".to_string()));
+                        terminal.draw(|frame| ui::render(frame, &app))?;
+                        match backend.delete_messages(&folder, &[id]).await {
+                            Ok(_) => {
+                                app.remove_envelope(app.selected);
+                                app.status = None;
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::EnvelopeList;
+                                }
+                            }
+                            Err(e) => {
+                                app.status = Some(Status::Error(format!("Delete failed: {e}")));
+                            }
+                        }
+                    }
+                }
+            }
+            Action::ArchiveMessage => {
+                if let Some(env) = app.envelopes.get(app.selected) {
+                    let id_str = env.id.clone();
+                    if let Ok(id) = id_str.parse::<usize>() {
+                        app.status = Some(Status::Working("Archiving...".to_string()));
+                        terminal.draw(|frame| ui::render(frame, &app))?;
+                        match backend.move_messages(&folder, &archive_folder, &[id]).await {
+                            Ok(_) => {
+                                app.remove_envelope(app.selected);
+                                app.status = None;
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::EnvelopeList;
+                                }
+                            }
+                            Err(e) => {
+                                app.status = Some(Status::Error(format!("Archive failed: {e}")));
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -95,14 +95,15 @@ downloads-dir = "~/downloads"
 
 
 
-# Defines aliases for your mailboxes. There are 4 special aliases used
-# by the tool: inbox, sent, drafts and trash. Other aliases can be
-# defined as well.
+# Defines aliases for your mailboxes. There are 5 special aliases used
+# by the tool: inbox, sent, drafts, trash and archive. Other aliases
+# can be defined as well.
 #
 folder.aliases.inbox = "INBOX"
 folder.aliases.sent = "Sent"
 folder.aliases.drafts = "Drafts"
 folder.aliases.trash = "Trash"
+folder.aliases.archive = "Archive"
 folder.aliases.a23 = "Archives/2023"
 
 # Customizes the number of folders to show by page.

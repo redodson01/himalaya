@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{App, View};
+use crate::tui::app::{App, Status, View};
 
 const FROM_COLOR: Color = Color::Cyan;
 const FLAGGED_COLOR: Color = Color::Yellow;
@@ -130,15 +130,32 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(chunks[1]);
 
-    let keybindings = Line::from(vec![
-        Span::styled(" q", Style::default().fg(Color::Yellow)),
-        Span::raw(": quit | "),
-        Span::styled("Enter", Style::default().fg(Color::Yellow)),
-        Span::raw(": read | "),
-        Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": navigate"),
-    ]);
-    frame.render_widget(Paragraph::new(keybindings), chunks_bottom[0]);
+    let status_line: Line = if let Some(status) = &app.status {
+        match status {
+            Status::Working(msg) => Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(Color::Yellow),
+            )),
+            Status::Error(msg) => Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(Color::Red),
+            )),
+        }
+    } else {
+        Line::from(vec![
+            Span::styled(" q", Style::default().fg(Color::Yellow)),
+            Span::raw(": quit | "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(": read | "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": navigate | "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(": delete | "),
+            Span::styled("a", Style::default().fg(Color::Yellow)),
+            Span::raw(": archive"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
 
     let dim = Style::default().add_modifier(Modifier::DIM);
     let flag_key = Line::from(vec![
@@ -202,7 +219,11 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
         Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
         Span::raw(": back | "),
         Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": scroll"),
+        Span::raw(": scroll | "),
+        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::raw(": delete | "),
+        Span::styled("a", Style::default().fg(Color::Yellow)),
+        Span::raw(": archive"),
     ]);
     frame.render_widget(Paragraph::new(status), chunks[1]);
 }

@@ -75,12 +75,18 @@ pub enum View {
     MessageRead { content: String, scroll: u16 },
 }
 
+pub enum Status {
+    Working(String),
+    Error(String),
+}
+
 pub struct App {
     pub envelopes: Vec<EnvelopeData>,
     pub selected: usize,
     pub view: View,
     pub folder: String,
     pub should_quit: bool,
+    pub status: Option<Status>,
 }
 
 impl App {
@@ -91,6 +97,7 @@ impl App {
             view: View::EnvelopeList,
             folder,
             should_quit: false,
+            status: None,
         }
     }
 
@@ -102,6 +109,25 @@ impl App {
 
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Remove the envelope at the given index.
+    /// Returns the removed envelope data, or `None` if the index is out of bounds.
+    pub fn remove_envelope(&mut self, index: usize) -> Option<EnvelopeData> {
+        if index >= self.envelopes.len() {
+            return None;
+        }
+
+        let removed = self.envelopes.remove(index);
+
+        // Clamp selected index
+        if !self.envelopes.is_empty() {
+            self.selected = self.selected.min(self.envelopes.len() - 1);
+        } else {
+            self.selected = 0;
+        }
+
+        Some(removed)
     }
 }
 
@@ -229,6 +255,47 @@ mod tests {
         assert!(data.flags.is_empty());
         assert!(data.unseen); // no Seen flag
         assert!(!data.flagged); // no Flagged flag
+    }
+
+    #[test]
+    fn remove_envelope_basic() {
+        let envelopes = vec![
+            make_envelope("1", "a"),
+            make_envelope("2", "b"),
+            make_envelope("3", "c"),
+        ];
+        let mut app = App::new(envelopes, "INBOX".to_string());
+        app.selected = 1;
+        let removed = app.remove_envelope(1);
+        assert_eq!(removed.unwrap().id, "2");
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.selected, 1); // clamped to last item
+        assert_eq!(app.envelopes[1].id, "3");
+    }
+
+    #[test]
+    fn remove_envelope_last_item() {
+        let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
+        let mut app = App::new(envelopes, "INBOX".to_string());
+        app.selected = 1;
+        app.remove_envelope(1);
+        assert_eq!(app.envelopes.len(), 1);
+        assert_eq!(app.selected, 0); // clamped
+    }
+
+    #[test]
+    fn remove_envelope_only_item() {
+        let envelopes = vec![make_envelope("1", "a")];
+        let mut app = App::new(envelopes, "INBOX".to_string());
+        app.remove_envelope(0);
+        assert!(app.envelopes.is_empty());
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn remove_envelope_out_of_bounds() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        assert!(app.remove_envelope(0).is_none());
     }
 
     #[test]

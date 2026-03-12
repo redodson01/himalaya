@@ -28,6 +28,14 @@ pub struct EnvelopeData {
     pub flags: String,
     pub unseen: bool,
     pub flagged: bool,
+    pub account: String,
+}
+
+/// Tracks a contiguous range of envelopes belonging to one account.
+pub struct AccountSection {
+    pub name: String,
+    pub start: usize,
+    pub count: usize,
 }
 
 impl From<&Envelope> for EnvelopeData {
@@ -66,6 +74,7 @@ impl From<&Envelope> for EnvelopeData {
             flags,
             unseen,
             flagged,
+            account: String::new(),
         }
     }
 }
@@ -82,6 +91,7 @@ pub enum Status {
 
 pub struct App {
     pub envelopes: Vec<EnvelopeData>,
+    pub sections: Vec<AccountSection>,
     pub selected: usize,
     pub view: View,
     pub folder: String,
@@ -93,12 +103,18 @@ impl App {
     pub fn new(envelopes: Vec<EnvelopeData>, folder: String) -> Self {
         Self {
             envelopes,
+            sections: Vec::new(),
             selected: 0,
             view: View::EnvelopeList,
             folder,
             should_quit: false,
             status: None,
         }
+    }
+
+    pub fn with_sections(mut self, sections: Vec<AccountSection>) -> Self {
+        self.sections = sections;
+        self
     }
 
     pub fn select_next(&mut self) {
@@ -111,7 +127,7 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    /// Remove the envelope at the given index.
+    /// Remove the envelope at the given index, updating sections accordingly.
     /// Returns the removed envelope data, or `None` if the index is out of bounds.
     pub fn remove_envelope(&mut self, index: usize) -> Option<EnvelopeData> {
         if index >= self.envelopes.len() {
@@ -119,6 +135,23 @@ impl App {
         }
 
         let removed = self.envelopes.remove(index);
+
+        // Update sections: find the section containing this index
+        let mut section_to_remove = None;
+        for (si, section) in self.sections.iter_mut().enumerate() {
+            if index >= section.start && index < section.start + section.count {
+                section.count -= 1;
+                if section.count == 0 {
+                    section_to_remove = Some(si);
+                }
+            } else if section.start > index {
+                section.start -= 1;
+            }
+        }
+
+        if let Some(si) = section_to_remove {
+            self.sections.remove(si);
+        }
 
         // Clamp selected index
         if !self.envelopes.is_empty() {
@@ -144,6 +177,7 @@ mod tests {
             flags: String::new(),
             unseen: false,
             flagged: false,
+            account: String::new(),
         }
     }
 
@@ -258,6 +292,38 @@ mod tests {
     }
 
     #[test]
+    fn multi_section_navigation() {
+        let envelopes = vec![
+            make_envelope("1", "a"),
+            make_envelope("2", "b"),
+            make_envelope("3", "c"),
+        ];
+        let sections = vec![
+            AccountSection {
+                name: "work".to_string(),
+                start: 0,
+                count: 2,
+            },
+            AccountSection {
+                name: "personal".to_string(),
+                start: 2,
+                count: 1,
+            },
+        ];
+        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+
+        assert_eq!(app.selected, 0);
+        app.select_next();
+        assert_eq!(app.selected, 1);
+        app.select_next();
+        assert_eq!(app.selected, 2);
+
+        // Clamp at end
+        app.select_next();
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
     fn remove_envelope_basic() {
         let envelopes = vec![
             make_envelope("1", "a"),
@@ -296,6 +362,60 @@ mod tests {
     fn remove_envelope_out_of_bounds() {
         let mut app = App::new(vec![], "INBOX".to_string());
         assert!(app.remove_envelope(0).is_none());
+    }
+
+    #[test]
+    fn remove_envelope_updates_sections() {
+        let envelopes = vec![
+            make_envelope("1", "a"),
+            make_envelope("2", "b"),
+            make_envelope("3", "c"),
+            make_envelope("4", "d"),
+        ];
+        let sections = vec![
+            AccountSection {
+                name: "work".to_string(),
+                start: 0,
+                count: 2,
+            },
+            AccountSection {
+                name: "personal".to_string(),
+                start: 2,
+                count: 2,
+            },
+        ];
+        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+
+        // Remove from first section
+        app.remove_envelope(0);
+        assert_eq!(app.sections[0].count, 1);
+        assert_eq!(app.sections[0].start, 0);
+        assert_eq!(app.sections[1].start, 1); // shifted
+        assert_eq!(app.sections[1].count, 2);
+    }
+
+    #[test]
+    fn remove_envelope_removes_empty_section() {
+        let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
+        let sections = vec![
+            AccountSection {
+                name: "work".to_string(),
+                start: 0,
+                count: 1,
+            },
+            AccountSection {
+                name: "personal".to_string(),
+                start: 1,
+                count: 1,
+            },
+        ];
+        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+
+        // Remove only item in first section
+        app.remove_envelope(0);
+        assert_eq!(app.sections.len(), 1);
+        assert_eq!(app.sections[0].name, "personal");
+        assert_eq!(app.sections[0].start, 0);
     }
 
     #[test]

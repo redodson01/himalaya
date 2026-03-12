@@ -11,13 +11,14 @@ use crate::tui::app::{App, Status, View};
 const FROM_COLOR: Color = Color::Cyan;
 const FLAGGED_COLOR: Color = Color::Yellow;
 const HEADER_COLOR: Color = Color::Cyan;
+const SECTION_HEADER_COLOR: Color = Color::LightRed;
 
 pub fn render(frame: &mut Frame, app: &App) {
     match &app.view {
         View::EnvelopeList => render_envelope_list(frame, app),
         View::MessageRead {
             content, scroll, ..
-        } => render_message(frame, content, *scroll),
+        } => render_message(frame, content, *scroll, app.status.as_ref()),
     }
 }
 
@@ -41,63 +42,94 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     .style(header_style)
     .bottom_margin(1);
 
-    let rows: Vec<Row> = app
-        .envelopes
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let is_selected = app.selected == i;
-            let highlight = if is_selected {
-                Modifier::REVERSED
-            } else {
-                Modifier::empty()
-            };
+    // Build a set of envelope indices that start a new account section,
+    // tracking whether each is the first section (to skip the blank separator).
+    let section_starts: std::collections::HashMap<usize, (&str, bool)> = {
+        let mut first = true;
+        app.sections
+            .iter()
+            .filter(|s| s.count > 0)
+            .map(|s| {
+                let is_first = first;
+                first = false;
+                (s.start, (s.name.as_str(), is_first))
+            })
+            .collect()
+    };
 
-            let base_modifier = if e.unseen {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            };
+    // Build rows, inserting visual section headers when the account changes.
+    // We track a mapping from table-row index to envelope index so that
+    // the selected highlight lands on the right table row.
+    let mut rows: Vec<Row> = Vec::new();
+    let mut envelope_to_table_row: Vec<usize> = Vec::new();
 
-            let dim = if e.unseen {
-                Modifier::empty()
-            } else {
-                Modifier::DIM
-            };
+    for (i, e) in app.envelopes.iter().enumerate() {
+        // Insert a section header row if this envelope starts a new section
+        if let Some((account_name, is_first)) = section_starts.get(&i) {
+            if !is_first {
+                rows.push(Row::new(std::iter::repeat_with(|| Cell::from("")).take(11)));
+            }
+            let style = Style::default()
+                .fg(SECTION_HEADER_COLOR)
+                .add_modifier(Modifier::BOLD);
+            let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from("")).take(11).collect();
+            cells[4] = Cell::from(account_name.to_string()).style(style);
+            rows.push(Row::new(cells));
+        }
 
-            let flag_style = if e.flagged {
-                Style::default()
-                    .fg(FLAGGED_COLOR)
-                    .add_modifier(base_modifier | highlight)
-            } else {
-                Style::default().add_modifier(dim | base_modifier | highlight)
-            };
+        envelope_to_table_row.push(rows.len());
 
-            let from_style = if e.unseen {
-                Style::default().add_modifier(Modifier::BOLD | highlight)
-            } else {
-                Style::default().fg(FROM_COLOR).add_modifier(highlight)
-            };
+        let is_selected = app.selected == i;
+        let highlight = if is_selected {
+            Modifier::REVERSED
+        } else {
+            Modifier::empty()
+        };
 
-            let from_combined = from_style.add_modifier(base_modifier);
-            let subject_style = Style::default().add_modifier(base_modifier | highlight);
-            let date_style = Style::default().add_modifier(dim | base_modifier | highlight);
+        let base_modifier = if e.unseen {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        };
 
-            Row::new([
-                Cell::from(" ").style(flag_style),
-                Cell::from(e.flags.as_str()).style(flag_style),
-                Cell::from(" ").style(flag_style),
-                Cell::from(" ").style(from_combined),
-                Cell::from(e.from.as_str()).style(from_combined),
-                Cell::from(" ").style(from_combined),
-                Cell::from(" ").style(subject_style),
-                Cell::from(e.subject.as_str()).style(subject_style),
-                Cell::from(" ").style(subject_style),
-                Cell::from(" ").style(date_style),
-                Cell::from(e.date.as_str()).style(date_style),
-            ])
-        })
-        .collect();
+        let dim = if e.unseen {
+            Modifier::empty()
+        } else {
+            Modifier::DIM
+        };
+
+        let flag_style = if e.flagged {
+            Style::default()
+                .fg(FLAGGED_COLOR)
+                .add_modifier(base_modifier | highlight)
+        } else {
+            Style::default().add_modifier(dim | base_modifier | highlight)
+        };
+
+        let from_style = if e.unseen {
+            Style::default().add_modifier(Modifier::BOLD | highlight)
+        } else {
+            Style::default().fg(FROM_COLOR).add_modifier(highlight)
+        };
+
+        let from_combined = from_style.add_modifier(base_modifier);
+        let subject_style = Style::default().add_modifier(base_modifier | highlight);
+        let date_style = Style::default().add_modifier(dim | base_modifier | highlight);
+
+        rows.push(Row::new([
+            Cell::from(" ").style(flag_style),
+            Cell::from(e.flags.as_str()).style(flag_style),
+            Cell::from(" ").style(flag_style),
+            Cell::from(" ").style(from_combined),
+            Cell::from(e.from.as_str()).style(from_combined),
+            Cell::from(" ").style(from_combined),
+            Cell::from(" ").style(subject_style),
+            Cell::from(e.subject.as_str()).style(subject_style),
+            Cell::from(" ").style(subject_style),
+            Cell::from(" ").style(date_style),
+            Cell::from(e.date.as_str()).style(date_style),
+        ]));
+    }
 
     let table = Table::new(
         rows,
@@ -123,24 +155,27 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
             .title(format!(" {} ", app.folder)),
     );
 
-    let mut state = TableState::default().with_selected(Some(app.selected));
+    // Map the envelope selection index to the correct table row
+    let table_selected = envelope_to_table_row
+        .get(app.selected)
+        .copied()
+        .unwrap_or(app.selected);
+    let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
     let chunks_bottom =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
             .split(chunks[1]);
 
-    let status_line: Line = if let Some(status) = &app.status {
-        match status {
-            Status::Working(msg) => Line::from(Span::styled(
-                format!(" {msg}"),
-                Style::default().fg(Color::Yellow),
-            )),
-            Status::Error(msg) => Line::from(Span::styled(
-                format!(" {msg}"),
-                Style::default().fg(Color::Red),
-            )),
-        }
+    let status_line = if let Some(status) = &app.status {
+        let (msg, color) = match status {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
     } else {
         Line::from(vec![
             Span::styled(" q", Style::default().fg(Color::Yellow)),
@@ -176,7 +211,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     );
 }
 
-fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
+fn render_message(frame: &mut Frame, content: &str, scroll: u16, status: Option<&Status>) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
     // Color header lines (e.g. "From: ...", "Subject: ...") differently from body.
@@ -215,17 +250,28 @@ fn render_message(frame: &mut Frame, content: &str, scroll: u16) {
 
     frame.render_widget(paragraph, chunks[0]);
 
-    let status = Line::from(vec![
-        Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
-        Span::raw(": back | "),
-        Span::styled("j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(": scroll | "),
-        Span::styled("d", Style::default().fg(Color::Yellow)),
-        Span::raw(": delete | "),
-        Span::styled("a", Style::default().fg(Color::Yellow)),
-        Span::raw(": archive"),
-    ]);
-    frame.render_widget(Paragraph::new(status), chunks[1]);
+    let status_line = if let Some(s) = status {
+        let (msg, color) = match s {
+            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Error(msg) => (msg.as_str(), Color::Red),
+        };
+        Line::from(Span::styled(
+            format!(" {msg}"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+            Span::raw(": back | "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(": scroll | "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(": delete | "),
+            Span::styled("a", Style::default().fg(Color::Yellow)),
+            Span::raw(": archive"),
+        ])
+    };
+    frame.render_widget(Paragraph::new(status_line), chunks[1]);
 }
 
 /// Check if a line looks like an email header (e.g. "From: ...", "Subject: ...").

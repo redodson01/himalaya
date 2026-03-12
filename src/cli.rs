@@ -67,6 +67,11 @@ pub struct Cli {
     #[arg(value_name = "FORMAT", value_enum, default_value_t = Default::default())]
     pub output: OutputFmt,
 
+    /// Launch interactive terminal UI.
+    #[cfg(feature = "tui")]
+    #[arg(long, global = true, env = "HIMALAYA_TUI")]
+    pub tui: bool,
+
     /// Override the default account.
     ///
     /// An account name corresponds to an entry in the table at the

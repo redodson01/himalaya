@@ -33,29 +33,33 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(config_paths: &[PathBuf], all: bool, _account: Option<String>) -> Result<()> {
+pub async fn run(config_paths: &[PathBuf], all: bool, account: Option<String>) -> Result<()> {
     let config = TomlConfig::from_paths_or_default(config_paths).await?;
 
     if all {
         run_all_accounts(config).await
     } else {
-        run_single_account(config).await
+        run_single_account(config, account).await
     }
 }
 
-async fn run_single_account(config: TomlConfig) -> Result<()> {
-    // Determine the account name so single-account mode matches --all visually.
-    // Find the account with `default = true`, matching into_account_configs(None) logic.
-    let account_name = config
-        .accounts
-        .iter()
-        .find_map(|(name, acct)| acct.default.filter(|&d| d).map(|_| name.clone()))
-        .or_else(|| config.accounts.keys().next().cloned())
-        .unwrap_or_default();
+async fn run_single_account(config: TomlConfig, account: Option<String>) -> Result<()> {
+    // Determine the account name: use --account flag if provided, otherwise
+    // find the account with `default = true`, matching into_account_configs(None) logic.
+    let account_name = if let Some(ref name) = account {
+        name.clone()
+    } else {
+        config
+            .accounts
+            .iter()
+            .find_map(|(name, acct)| acct.default.filter(|&d| d).map(|_| name.clone()))
+            .or_else(|| config.accounts.keys().next().cloned())
+            .unwrap_or_default()
+    };
 
     let (toml_account_config, account_config) = config
         .clone()
-        .into_account_configs(None::<&str>, |c: &Config, name| c.account(name).ok())?;
+        .into_account_configs(account.as_deref(), |c: &Config, name| c.account(name).ok())?;
 
     let toml_account_config = Arc::new(toml_account_config);
     let account_config = Arc::new(account_config);

@@ -54,13 +54,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut printer = StdoutPrinter::new(cli.output);
     let res = match cli.command {
-        Some(cmd) => {
+        Some(mut cmd) => {
+            if let Some(name) = cli.account {
+                cmd.set_account(name);
+            }
             cmd.execute(&mut printer, cli.config_paths.as_ref(), cli.all)
                 .await
         }
         None => {
-            let cmd =
+            let mut cmd =
                 HimalayaCommand::Envelope(EnvelopeSubcommand::List(EnvelopeListCommand::default()));
+            if let Some(name) = cli.account {
+                cmd.set_account(name);
+            }
             cmd.execute(&mut printer, cli.config_paths.as_ref(), cli.all)
                 .await
         }

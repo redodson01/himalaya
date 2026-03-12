@@ -92,6 +92,15 @@ fn folder_help() {
 }
 
 #[test]
+fn account_flag_in_help() {
+    himalaya()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--account"));
+}
+
+#[test]
 fn all_flag_in_help() {
     himalaya()
         .arg("--help")
@@ -103,12 +112,10 @@ fn all_flag_in_help() {
 #[test]
 fn all_with_account_fails() {
     himalaya()
-        .args(["--all", "envelope", "list", "--account", "foo"])
+        .args(["--all", "--account", "foo", "envelope", "list"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "--all and --account are mutually exclusive",
-        ));
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

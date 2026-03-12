@@ -20,6 +20,12 @@ pub enum AttachmentSubcommand {
 }
 
 impl AttachmentSubcommand {
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::Download(cmd) => cmd.account.name = Some(name),
+        }
+    }
+
     pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         match self {
             Self::Download(cmd) => cmd.execute(printer, config).await,

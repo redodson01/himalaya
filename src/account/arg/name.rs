@@ -24,14 +24,12 @@ pub struct OptionalAccountNameArg {
     pub name: Option<String>,
 }
 
-/// The account name flag parser.
+/// Container for the account name, populated from the global
+/// `--account` / `-a` flag on the top-level `Cli` struct before
+/// command execution. This struct is kept for backward compatibility
+/// with command code that reads `self.account.name`.
 #[derive(Clone, Debug, Default, Parser)]
 pub struct AccountNameFlag {
-    /// Override the default account.
-    ///
-    /// An account name corresponds to an entry in the table at the
-    /// root level of your TOML configuration file.
-    #[arg(long = "account", short = 'a')]
-    #[arg(name = "account_name", value_name = "NAME")]
+    #[arg(skip)]
     pub name: Option<String>,
 }

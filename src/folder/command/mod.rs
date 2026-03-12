@@ -38,6 +38,16 @@ pub enum FolderSubcommand {
 }
 
 impl FolderSubcommand {
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::Add(cmd) => cmd.account.name = Some(name),
+            Self::List(cmd) => cmd.account.name = Some(name),
+            Self::Expunge(cmd) => cmd.account.name = Some(name),
+            Self::Purge(cmd) => cmd.account.name = Some(name),
+            Self::Delete(cmd) => cmd.account.name = Some(name),
+        }
+    }
+
     #[allow(unused)]
     pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         match self {

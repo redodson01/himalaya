@@ -139,6 +139,12 @@ pub struct MoveFolderPickerState {
     pub folder_envelope_state: Option<Box<FolderEnvelopeState>>,
 }
 
+pub struct AccountPickerState {
+    pub accounts: Vec<String>,
+    pub selected: usize,
+    pub previous_view: Box<View>,
+}
+
 pub enum View {
     EnvelopeList,
     MessageRead {
@@ -149,6 +155,7 @@ pub enum View {
     FolderList(FolderListState),
     FolderEnvelopeList(FolderEnvelopeState),
     MoveFolderPicker(MoveFolderPickerState),
+    AccountPicker(AccountPickerState),
 }
 
 pub enum Status {
@@ -208,6 +215,11 @@ impl App {
                     state.selected = (state.selected + 1).min(state.folders.len() - 1);
                 }
             }
+            View::AccountPicker(state) => {
+                if !state.accounts.is_empty() {
+                    state.selected = (state.selected + 1).min(state.accounts.len() - 1);
+                }
+            }
             _ => {}
         }
     }
@@ -218,6 +230,9 @@ impl App {
                 state.selected = state.selected.saturating_sub(1);
             }
             View::MoveFolderPicker(state) => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            View::AccountPicker(state) => {
                 state.selected = state.selected.saturating_sub(1);
             }
             _ => {}
@@ -266,6 +281,7 @@ impl App {
             View::FolderList(state) => state.folders.len(),
             View::FolderEnvelopeList(state) => state.envelopes.len(),
             View::MoveFolderPicker(state) => state.folders.len(),
+            View::AccountPicker(state) => state.accounts.len(),
             View::MessageRead { .. } => return, // no-op
         };
         self.search = Some(SearchState {
@@ -296,6 +312,7 @@ impl App {
             View::FolderList(state) => state.selected = original_index,
             View::FolderEnvelopeList(state) => state.selected = original_index,
             View::MoveFolderPicker(state) => state.selected = original_index,
+            View::AccountPicker(state) => state.selected = original_index,
             View::MessageRead { .. } => {}
         }
         true
@@ -341,6 +358,7 @@ impl App {
                 View::FolderList(state) => state.folders.len(),
                 View::FolderEnvelopeList(state) => state.envelopes.len(),
                 View::MoveFolderPicker(state) => state.folders.len(),
+                View::AccountPicker(state) => state.accounts.len(),
                 View::MessageRead { .. } => 0,
             };
             search.matched_indices = (0..len).collect();
@@ -371,6 +389,7 @@ impl App {
                 .map(|e| format!("{} {}", e.subject, e.from))
                 .collect(),
             View::MoveFolderPicker(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
+            View::AccountPicker(state) => state.accounts.clone(),
             View::MessageRead { .. } => Vec::new(),
         };
 
@@ -1041,6 +1060,90 @@ mod tests {
             assert_eq!(state.selected, 2);
         } else {
             panic!("expected MoveFolderPicker view");
+        }
+    }
+
+    // --- AccountPicker tests ---
+
+    fn make_account_picker_view(count: usize, selected: usize) -> View {
+        let accounts = (0..count).map(|i| format!("account{i}")).collect();
+        View::AccountPicker(AccountPickerState {
+            accounts,
+            selected,
+            previous_view: Box::new(View::EnvelopeList),
+        })
+    }
+
+    #[test]
+    fn account_picker_select_next_advances() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_account_picker_view(3, 0);
+        app.folder_select_next();
+        if let View::AccountPicker(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected AccountPicker view");
+        }
+    }
+
+    #[test]
+    fn account_picker_select_next_clamps() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_account_picker_view(2, 1);
+        app.folder_select_next();
+        if let View::AccountPicker(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected AccountPicker view");
+        }
+    }
+
+    #[test]
+    fn account_picker_select_prev_decrements() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_account_picker_view(3, 2);
+        app.folder_select_prev();
+        if let View::AccountPicker(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected AccountPicker view");
+        }
+    }
+
+    #[test]
+    fn account_picker_select_prev_clamps_at_zero() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_account_picker_view(3, 0);
+        app.folder_select_prev();
+        if let View::AccountPicker(state) = &app.view {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected AccountPicker view");
+        }
+    }
+
+    #[test]
+    fn account_picker_search_filters() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_account_picker_view(3, 0); // account0, account1, account2
+        app.start_search();
+        app.search_push_char('1'); // should match "account1"
+        let search = app.search.as_ref().unwrap();
+        assert!(search.matched_indices.contains(&1));
+        assert!(!search.matched_indices.contains(&0) || !search.matched_indices.contains(&2));
+    }
+
+    #[test]
+    fn account_picker_confirm_search_maps_selection() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = make_account_picker_view(3, 0);
+        app.start_search();
+        app.search_push_char('2'); // match account2 at index 2
+        assert!(app.confirm_search());
+        if let View::AccountPicker(state) = &app.view {
+            assert_eq!(state.selected, 2);
+        } else {
+            panic!("expected AccountPicker view");
         }
     }
 }

@@ -503,6 +503,11 @@ fn apply_backend_result(
             account_key,
             folder,
         } => {
+            // Cache the message content for instant re-display
+            app.cache
+                .messages
+                .insert(envelope_id.clone(), content.clone());
+
             // View already transitioned optimistically — just fill in the content
             if let View::MessageRead {
                 content: view_content,
@@ -525,13 +530,25 @@ fn apply_backend_result(
             sections,
             saved_envelope_selected,
         } => {
-            app.status = None;
-            app.view = View::FolderList(FolderListState {
-                folders,
-                sections,
-                selected: 0,
-                saved_envelope_selected,
-            });
+            // Cache the folder list for instant display next time
+            app.cache.folders = Some((folders.clone(), sections.clone()));
+
+            // Update the view if the user is still waiting for folders (EnvelopeList
+            // on first load) or already viewing them (FolderList on background refresh)
+            if matches!(app.view, View::FolderList(_) | View::EnvelopeList) {
+                app.status = None;
+                let selected = if let View::FolderList(state) = &app.view {
+                    state.selected
+                } else {
+                    0
+                };
+                app.view = View::FolderList(FolderListState {
+                    folders,
+                    sections,
+                    selected,
+                    saved_envelope_selected,
+                });
+            }
         }
         BackendResult::FolderEnvelopesLoaded {
             folder_name,
@@ -539,9 +556,15 @@ fn apply_backend_result(
             envelopes,
             parent,
         } => {
+            // Cache folder envelopes for instant display next time
+            app.cache.folder_envelopes.insert(
+                (account_key.clone(), folder_name.clone()),
+                envelopes.clone(),
+            );
+
             // Update the view if the user is still waiting for this folder (FolderList
             // on first load, EnvelopeList on legacy path) or already viewing it
-            // (FolderEnvelopeList on background refresh)
+            // (FolderEnvelopeList on background refresh / cached view)
             let should_update = matches!(app.view, View::EnvelopeList | View::FolderList(_))
                 || matches!(
                     &app.view,
@@ -929,6 +952,17 @@ fn start_full_refresh(
     spawn_refresh_envelope_list(backends, tx);
 }
 
+/// Sync the folder envelope cache from the current FolderEnvelopeList view state.
+/// Call after any optimistic mutation that modifies folder-specific envelopes.
+fn sync_folder_envelope_cache(app: &mut App) {
+    if let View::FolderEnvelopeList(state) = &app.view {
+        app.cache.folder_envelopes.insert(
+            (state.account_key.clone(), state.folder_name.clone()),
+            state.envelopes.clone(),
+        );
+    }
+}
+
 /// If the current view is a folder-specific view (FolderEnvelopeList or MessageRead
 /// with folder_context), spawn a background re-fetch of that folder's envelopes so
 /// the view reflects any changes (e.g. draft deleted after send/discard).
@@ -1112,6 +1146,10 @@ async fn run_event_loop(
                             }
                         }
 
+                        // Use cached message content if available
+                        let cached_content =
+                            app.cache.messages.get(&ctx.id).cloned().unwrap_or_default();
+
                         if in_folder_context {
                             let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
                             let folder_state = match old_view {
@@ -1126,13 +1164,13 @@ async fn run_event_loop(
                                 }
                             };
                             app.view = View::MessageRead {
-                                content: String::new(),
+                                content: cached_content,
                                 scroll: 0,
                                 folder_context: Some(Box::new(folder_state)),
                             };
                         } else {
                             app.view = View::MessageRead {
-                                content: String::new(),
+                                content: cached_content,
                                 scroll: 0,
                                 folder_context: None,
                             };
@@ -1232,6 +1270,7 @@ async fn run_event_loop(
                             };
                             state.remove_envelope(state.selected);
                             app.view = View::FolderEnvelopeList(state);
+                            sync_folder_envelope_cache(app);
                         } else {
                             app.remove_envelope(app.selected);
                             if !matches!(app.view, View::EnvelopeList) {
@@ -1293,6 +1332,7 @@ async fn run_event_loop(
                                     app.view = View::FolderEnvelopeList(*ctx);
                                 }
                             }
+                            sync_folder_envelope_cache(app);
                         } else {
                             if !matches!(app.view, View::EnvelopeList) {
                                 app.view = View::EnvelopeList;
@@ -1356,6 +1396,7 @@ async fn run_event_loop(
                                     app.view = View::FolderEnvelopeList(*ctx);
                                 }
                             }
+                            sync_folder_envelope_cache(app);
                         } else {
                             if !matches!(app.view, View::EnvelopeList) {
                                 app.view = View::EnvelopeList;
@@ -1393,9 +1434,20 @@ async fn run_event_loop(
                     }
                 }
                 Action::OpenFolderList => {
-                    app.status = Some(Status::Working("Loading folders…".to_string()));
-
                     let saved_envelope_selected = app.selected;
+
+                    // Show cached folders immediately if available
+                    if let Some((folders, sections)) = &app.cache.folders {
+                        app.view = View::FolderList(FolderListState {
+                            folders: folders.clone(),
+                            sections: sections.clone(),
+                            selected: 0,
+                            saved_envelope_selected,
+                        });
+                        app.status = Some(Status::Working("Refreshing folders…".to_string()));
+                    } else {
+                        app.status = Some(Status::Working("Loading folders…".to_string()));
+                    }
                     let tx = tx.clone();
 
                     // Spawn folder loading for all backends
@@ -1506,8 +1558,6 @@ async fn run_event_loop(
                     };
 
                     if let Some((folder_name, account_key)) = folder_info {
-                        app.status = Some(Status::Working(format!("Loading {folder_name}…")));
-
                         let key = if !account_key.is_empty() {
                             account_key.clone()
                         } else if backends.contains_key(default_account) {
@@ -1524,6 +1574,26 @@ async fn run_event_loop(
                             } else {
                                 unreachable!()
                             };
+
+                            // Show cached folder envelopes immediately if available
+                            if let Some(cached) = app
+                                .cache
+                                .folder_envelopes
+                                .get(&(key.clone(), folder_name.clone()))
+                            {
+                                app.view = View::FolderEnvelopeList(FolderEnvelopeState {
+                                    envelopes: cached.clone(),
+                                    selected: 0,
+                                    folder_name: folder_name.clone(),
+                                    account_key: key.clone(),
+                                    parent: parent.clone(),
+                                });
+                                app.status =
+                                    Some(Status::Working(format!("Refreshing {folder_name}…")));
+                            } else {
+                                app.status =
+                                    Some(Status::Working(format!("Loading {folder_name}…")));
+                            }
 
                             let tx = tx.clone();
                             let backend = backend.clone();
@@ -1611,6 +1681,7 @@ async fn run_event_loop(
                             };
                             state.remove_envelope(state.selected);
                             app.view = View::FolderEnvelopeList(state);
+                            sync_folder_envelope_cache(app);
                         } else {
                             app.remove_envelope(app.selected);
                             if !matches!(app.view, View::EnvelopeList) {
@@ -1741,6 +1812,7 @@ async fn run_event_loop(
                                     if let Some(mut fe_state) = picker.folder_envelope_state {
                                         fe_state.remove_envelope(source_envelope_index);
                                         app.view = View::FolderEnvelopeList(*fe_state);
+                                        sync_folder_envelope_cache(app);
                                     }
                                 } else {
                                     app.remove_envelope(source_envelope_index);

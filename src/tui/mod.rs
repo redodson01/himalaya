@@ -1963,3 +1963,920 @@ async fn run_event_loop(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use self::app::{
+        AccountSection, App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderListState,
+        FolderSection, Status, View,
+    };
+    use super::*;
+
+    fn make_envelope(id: &str, subject: &str) -> EnvelopeData {
+        EnvelopeData {
+            id: id.to_string(),
+            subject: subject.to_string(),
+            from: "test@example.com".to_string(),
+            date: "2025-01-01 00:00".to_string(),
+            flags: String::new(),
+            unseen: false,
+            flagged: false,
+            account: String::new(),
+        }
+    }
+
+    fn make_envelope_for(id: &str, subject: &str, account: &str) -> EnvelopeData {
+        let mut env = make_envelope(id, subject);
+        env.account = account.to_string();
+        env
+    }
+
+    /// Create the test fixtures needed for apply_backend_result: an empty BackendMap
+    /// and a channel. The tx is only used by BackendReady and Error{needs_refresh},
+    /// which we don't test here.
+    fn test_fixtures() -> (
+        BackendMap,
+        mpsc::UnboundedSender<BackendResult>,
+        mpsc::UnboundedReceiver<BackendResult>,
+    ) {
+        let backends = BackendMap::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        (backends, tx, rx)
+    }
+
+    fn make_folder_entry(name: &str, account: &str) -> FolderEntry {
+        FolderEntry {
+            name: name.to_string(),
+            account: account.to_string(),
+        }
+    }
+
+    fn make_folder_section(name: &str, start: usize, count: usize) -> FolderSection {
+        FolderSection {
+            name: name.to_string(),
+            start,
+            count,
+        }
+    }
+
+    fn make_folder_list_state() -> FolderListState {
+        FolderListState {
+            folders: vec![
+                make_folder_entry("INBOX", "work"),
+                make_folder_entry("Sent", "work"),
+            ],
+            sections: vec![make_folder_section("work", 0, 2)],
+            selected: 0,
+            saved_envelope_selected: 0,
+        }
+    }
+
+    // ---- EnvelopesLoaded ----
+
+    #[test]
+    fn envelopes_loaded_appends_new_account() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.pending_refreshes = 1;
+        app.status = Some(Status::Working("Loading…".to_string()));
+
+        let envelopes = vec![
+            make_envelope_for("1", "Hello", "work"),
+            make_envelope_for("2", "World", "work"),
+        ];
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::EnvelopesLoaded {
+                account: "work".to_string(),
+                envelopes,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.sections.len(), 1);
+        assert_eq!(app.sections[0].name, "work");
+        assert_eq!(app.sections[0].start, 0);
+        assert_eq!(app.sections[0].count, 2);
+        assert_eq!(app.pending_refreshes, 0);
+        assert!(app.status.is_none()); // cleared when pending_refreshes hits 0
+    }
+
+    #[test]
+    fn envelopes_loaded_replaces_existing_account() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(
+            vec![make_envelope_for("1", "Old", "work")],
+            "INBOX".to_string(),
+        );
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 1,
+        }];
+        app.pending_refreshes = 1;
+
+        let new_envelopes = vec![
+            make_envelope_for("2", "New A", "work"),
+            make_envelope_for("3", "New B", "work"),
+        ];
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::EnvelopesLoaded {
+                account: "work".to_string(),
+                envelopes: new_envelopes,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.envelopes[0].id, "2");
+        assert_eq!(app.envelopes[1].id, "3");
+        assert_eq!(app.sections[0].count, 2);
+    }
+
+    #[test]
+    fn envelopes_loaded_multi_account_sorts_sections() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.pending_refreshes = 2;
+        app.status = Some(Status::Working("Loading…".to_string()));
+
+        // Load "personal" first
+        apply_backend_result(
+            &mut app,
+            BackendResult::EnvelopesLoaded {
+                account: "personal".to_string(),
+                envelopes: vec![make_envelope_for("p1", "Personal", "personal")],
+            },
+            &mut backends,
+            &tx,
+        );
+        assert_eq!(app.pending_refreshes, 1);
+        assert!(app.status.is_some()); // still loading
+
+        // Load "business" second — should sort before "personal"
+        apply_backend_result(
+            &mut app,
+            BackendResult::EnvelopesLoaded {
+                account: "business".to_string(),
+                envelopes: vec![make_envelope_for("b1", "Business", "business")],
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.sections.len(), 2);
+        assert_eq!(app.sections[0].name, "business");
+        assert_eq!(app.sections[1].name, "personal");
+        assert_eq!(app.envelopes[0].id, "b1");
+        assert_eq!(app.envelopes[1].id, "p1");
+        assert_eq!(app.pending_refreshes, 0);
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn envelopes_loaded_clamps_selection() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(
+            vec![
+                make_envelope_for("1", "a", "work"),
+                make_envelope_for("2", "b", "work"),
+                make_envelope_for("3", "c", "work"),
+            ],
+            "INBOX".to_string(),
+        );
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 3,
+        }];
+        app.selected = 2; // last item
+        app.pending_refreshes = 1;
+
+        // Replace with fewer envelopes
+        apply_backend_result(
+            &mut app,
+            BackendResult::EnvelopesLoaded {
+                account: "work".to_string(),
+                envelopes: vec![make_envelope_for("4", "only one", "work")],
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.envelopes.len(), 1);
+        assert_eq!(app.selected, 0); // clamped
+    }
+
+    #[test]
+    fn envelopes_loaded_adjusts_subsequent_sections() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(
+            vec![
+                make_envelope_for("a1", "A1", "alpha"),
+                make_envelope_for("b1", "B1", "beta"),
+                make_envelope_for("b2", "B2", "beta"),
+            ],
+            "INBOX".to_string(),
+        );
+        app.sections = vec![
+            AccountSection {
+                name: "alpha".to_string(),
+                start: 0,
+                count: 1,
+            },
+            AccountSection {
+                name: "beta".to_string(),
+                start: 1,
+                count: 2,
+            },
+        ];
+        app.pending_refreshes = 1;
+
+        // Replace alpha with 3 envelopes (was 1) — beta section should shift
+        apply_backend_result(
+            &mut app,
+            BackendResult::EnvelopesLoaded {
+                account: "alpha".to_string(),
+                envelopes: vec![
+                    make_envelope_for("a1", "A1", "alpha"),
+                    make_envelope_for("a2", "A2", "alpha"),
+                    make_envelope_for("a3", "A3", "alpha"),
+                ],
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.envelopes.len(), 5);
+        assert_eq!(app.sections[0].name, "alpha");
+        assert_eq!(app.sections[0].count, 3);
+        assert_eq!(app.sections[1].name, "beta");
+        assert_eq!(app.sections[1].start, 3); // shifted from 1 to 3
+        assert_eq!(app.sections[1].count, 2);
+    }
+
+    // ---- MessageLoaded ----
+
+    #[test]
+    fn message_loaded_fills_view_and_caches() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![make_envelope("1", "Test")], "INBOX".to_string());
+        app.view = View::MessageRead {
+            content: "Loading…".to_string(),
+            scroll: 0,
+            folder_context: None,
+        };
+        app.status = Some(Status::Working("Reading…".to_string()));
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::MessageLoaded {
+                content: "Hello, world!".to_string(),
+                envelope_id: "1".to_string(),
+                was_unseen: false,
+                account_key: "work".to_string(),
+                folder: "INBOX".to_string(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::MessageRead { content, .. } = &app.view {
+            assert_eq!(content, "Hello, world!");
+        } else {
+            panic!("expected MessageRead view");
+        }
+        assert!(app.status.is_none());
+        assert_eq!(app.cache.messages.get("1").unwrap(), "Hello, world!");
+        assert!(app.last_read_context.is_none()); // was_unseen = false
+    }
+
+    #[test]
+    fn message_loaded_tracks_unseen_context() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![make_envelope("42", "Unread")], "INBOX".to_string());
+        app.view = View::MessageRead {
+            content: String::new(),
+            scroll: 0,
+            folder_context: None,
+        };
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::MessageLoaded {
+                content: "Content".to_string(),
+                envelope_id: "42".to_string(),
+                was_unseen: true,
+                account_key: "work".to_string(),
+                folder: "INBOX".to_string(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        let ctx = app.last_read_context.as_ref().unwrap();
+        assert_eq!(ctx.0, "work");
+        assert_eq!(ctx.1, "INBOX");
+        assert_eq!(ctx.2, "42");
+    }
+
+    #[test]
+    fn message_loaded_preserves_folder_context() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        let fe_state = FolderEnvelopeState {
+            envelopes: vec![make_envelope("1", "a")],
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+            parent: make_folder_list_state(),
+        };
+        app.view = View::MessageRead {
+            content: "Loading…".to_string(),
+            scroll: 5,
+            folder_context: Some(Box::new(fe_state)),
+        };
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::MessageLoaded {
+                content: "Actual content".to_string(),
+                envelope_id: "1".to_string(),
+                was_unseen: false,
+                account_key: "work".to_string(),
+                folder: "Sent".to_string(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::MessageRead {
+            content,
+            folder_context,
+            ..
+        } = &app.view
+        {
+            assert_eq!(content, "Actual content");
+            assert!(folder_context.is_some());
+        } else {
+            panic!("expected MessageRead view");
+        }
+    }
+
+    // ---- FoldersLoaded ----
+
+    #[test]
+    fn folders_loaded_transitions_from_envelope_list() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.status = Some(Status::Working("Loading folders…".to_string()));
+
+        let folders = vec![
+            make_folder_entry("INBOX", "work"),
+            make_folder_entry("Sent", "work"),
+        ];
+        let sections = vec![make_folder_section("work", 0, 2)];
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FoldersLoaded {
+                folders,
+                sections,
+                saved_envelope_selected: 3,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.folders.len(), 2);
+            assert_eq!(state.selected, 0);
+            assert_eq!(state.saved_envelope_selected, 3);
+        } else {
+            panic!("expected FolderList view");
+        }
+        assert!(app.status.is_none());
+        // Check cache
+        let cached = app.cache.folders.as_ref().unwrap();
+        assert_eq!(cached.0.len(), 2);
+    }
+
+    #[test]
+    fn folders_loaded_preserves_selection_on_refresh() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = View::FolderList(FolderListState {
+            folders: vec![make_folder_entry("INBOX", "work")],
+            sections: vec![make_folder_section("work", 0, 1)],
+            selected: 1,
+            saved_envelope_selected: 0,
+        });
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FoldersLoaded {
+                folders: vec![
+                    make_folder_entry("INBOX", "work"),
+                    make_folder_entry("Sent", "work"),
+                    make_folder_entry("Drafts", "work"),
+                ],
+                sections: vec![make_folder_section("work", 0, 3)],
+                saved_envelope_selected: 0,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1); // preserved
+            assert_eq!(state.folders.len(), 3);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folders_loaded_ignored_when_reading_message() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = View::MessageRead {
+            content: "reading something".to_string(),
+            scroll: 0,
+            folder_context: None,
+        };
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FoldersLoaded {
+                folders: vec![make_folder_entry("INBOX", "work")],
+                sections: vec![make_folder_section("work", 0, 1)],
+                saved_envelope_selected: 0,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        // View should NOT have changed
+        assert!(matches!(app.view, View::MessageRead { .. }));
+        // But cache should still be updated
+        assert!(app.cache.folders.is_some());
+    }
+
+    // ---- FolderEnvelopesLoaded ----
+
+    #[test]
+    fn folder_envelopes_loaded_from_folder_list() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        let parent = make_folder_list_state();
+        app.view = View::FolderList(parent.clone());
+        app.status = Some(Status::Working("Loading…".to_string()));
+
+        let envelopes = vec![make_envelope("1", "Hello")];
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FolderEnvelopesLoaded {
+                folder_name: "Sent".to_string(),
+                account_key: "work".to_string(),
+                envelopes,
+                parent: parent.clone(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::FolderEnvelopeList(state) = &app.view {
+            assert_eq!(state.folder_name, "Sent");
+            assert_eq!(state.account_key, "work");
+            assert_eq!(state.envelopes.len(), 1);
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected FolderEnvelopeList view");
+        }
+        assert!(app.status.is_none());
+        // Check cache
+        let cached = app
+            .cache
+            .folder_envelopes
+            .get(&("work".to_string(), "Sent".to_string()))
+            .unwrap();
+        assert_eq!(cached.len(), 1);
+    }
+
+    #[test]
+    fn folder_envelopes_loaded_from_envelope_list() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        // View is EnvelopeList (legacy path)
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FolderEnvelopesLoaded {
+                folder_name: "INBOX".to_string(),
+                account_key: "work".to_string(),
+                envelopes: vec![make_envelope("1", "Test")],
+                parent: make_folder_list_state(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert!(matches!(app.view, View::FolderEnvelopeList(_)));
+    }
+
+    #[test]
+    fn folder_envelopes_loaded_preserves_selection_on_refresh() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
+            envelopes: vec![make_envelope("1", "a"), make_envelope("2", "b")],
+            selected: 1,
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+            parent: make_folder_list_state(),
+        });
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FolderEnvelopesLoaded {
+                folder_name: "Sent".to_string(),
+                account_key: "work".to_string(),
+                envelopes: vec![
+                    make_envelope("1", "a"),
+                    make_envelope("2", "b"),
+                    make_envelope("3", "c"),
+                ],
+                parent: make_folder_list_state(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::FolderEnvelopeList(state) = &app.view {
+            assert_eq!(state.selected, 1); // preserved
+            assert_eq!(state.envelopes.len(), 3);
+        } else {
+            panic!("expected FolderEnvelopeList view");
+        }
+    }
+
+    #[test]
+    fn folder_envelopes_loaded_rejected_for_different_folder() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
+            envelopes: vec![make_envelope("1", "current")],
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+            parent: make_folder_list_state(),
+        });
+
+        // Result is for "Drafts" but we're viewing "Sent" — should be ignored
+        apply_backend_result(
+            &mut app,
+            BackendResult::FolderEnvelopesLoaded {
+                folder_name: "Drafts".to_string(),
+                account_key: "work".to_string(),
+                envelopes: vec![make_envelope("99", "stale result")],
+                parent: make_folder_list_state(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::FolderEnvelopeList(state) = &app.view {
+            assert_eq!(state.folder_name, "Sent"); // unchanged
+            assert_eq!(state.envelopes[0].id, "1"); // unchanged
+        } else {
+            panic!("expected FolderEnvelopeList view");
+        }
+        // Cache should still be updated even when view is not
+        let cached = app
+            .cache
+            .folder_envelopes
+            .get(&("work".to_string(), "Drafts".to_string()))
+            .unwrap();
+        assert_eq!(cached[0].id, "99");
+    }
+
+    #[test]
+    fn folder_envelopes_loaded_rejected_when_reading_message() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.view = View::MessageRead {
+            content: "reading".to_string(),
+            scroll: 0,
+            folder_context: None,
+        };
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::FolderEnvelopesLoaded {
+                folder_name: "INBOX".to_string(),
+                account_key: "work".to_string(),
+                envelopes: vec![make_envelope("1", "test")],
+                parent: make_folder_list_state(),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert!(matches!(app.view, View::MessageRead { .. }));
+    }
+
+    // ---- MoveFoldersLoaded ----
+
+    #[test]
+    fn move_folders_loaded_transitions_to_picker() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![make_envelope("1", "Test")], "INBOX".to_string());
+        app.status = Some(Status::Working("Loading folders…".to_string()));
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::MoveFoldersLoaded {
+                folders: vec![
+                    make_folder_entry("Archive", "work"),
+                    make_folder_entry("Trash", "work"),
+                ],
+                source_envelope_id: "1".to_string(),
+                source_envelope_index: 0,
+                source_folder: "INBOX".to_string(),
+                account_key: "work".to_string(),
+                return_to_folder: false,
+                folder_envelope_state: None,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert_eq!(state.folders.len(), 2);
+            assert_eq!(state.selected, 0);
+            assert_eq!(state.source_envelope_id, "1");
+            assert_eq!(state.source_folder, "INBOX");
+            assert!(!state.return_to_folder);
+            assert!(state.folder_envelope_state.is_none());
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn move_folders_loaded_empty_shows_error() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::MoveFoldersLoaded {
+                folders: vec![],
+                source_envelope_id: "1".to_string(),
+                source_envelope_index: 0,
+                source_folder: "INBOX".to_string(),
+                account_key: "work".to_string(),
+                return_to_folder: false,
+                folder_envelope_state: None,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert!(matches!(app.status, Some(Status::Error(_))));
+        assert!(matches!(app.view, View::EnvelopeList)); // unchanged
+    }
+
+    #[test]
+    fn move_folders_loaded_with_folder_context() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+
+        let fe_state = FolderEnvelopeState {
+            envelopes: vec![make_envelope("1", "a")],
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+            parent: make_folder_list_state(),
+        };
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::MoveFoldersLoaded {
+                folders: vec![make_folder_entry("Trash", "work")],
+                source_envelope_id: "1".to_string(),
+                source_envelope_index: 0,
+                source_folder: "Sent".to_string(),
+                account_key: "work".to_string(),
+                return_to_folder: true,
+                folder_envelope_state: Some(Box::new(fe_state)),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let View::MoveFolderPicker(state) = &app.view {
+            assert!(state.return_to_folder);
+            assert!(state.folder_envelope_state.is_some());
+        } else {
+            panic!("expected MoveFolderPicker view");
+        }
+    }
+
+    // ---- MutationDone ----
+
+    #[test]
+    fn mutation_done_clears_working_status() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.status = Some(Status::Working("Deleting…".to_string()));
+
+        apply_backend_result(&mut app, BackendResult::MutationDone, &mut backends, &tx);
+
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn mutation_done_preserves_error_status() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.status = Some(Status::Error("Something failed".to_string()));
+
+        apply_backend_result(&mut app, BackendResult::MutationDone, &mut backends, &tx);
+
+        assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    // ---- Error ----
+
+    #[test]
+    fn error_sets_status_and_decrements_pending() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.pending_refreshes = 2;
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::Error {
+                message: "Connection failed".to_string(),
+                needs_refresh: false,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        if let Some(Status::Error(msg)) = &app.status {
+            assert_eq!(msg, "Connection failed");
+        } else {
+            panic!("expected Error status");
+        }
+        assert_eq!(app.pending_refreshes, 1);
+    }
+
+    #[test]
+    fn error_pending_refreshes_doesnt_underflow() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.pending_refreshes = 0;
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::Error {
+                message: "Oops".to_string(),
+                needs_refresh: false,
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.pending_refreshes, 0); // saturating_sub
+    }
+
+    // ---- resort_sections ----
+
+    #[test]
+    fn resort_sections_sorts_by_name() {
+        let mut app = App::new(
+            vec![
+                make_envelope_for("c1", "C", "charlie"),
+                make_envelope_for("a1", "A", "alpha"),
+                make_envelope_for("b1", "B", "bravo"),
+            ],
+            "INBOX".to_string(),
+        );
+        app.sections = vec![
+            AccountSection {
+                name: "charlie".to_string(),
+                start: 0,
+                count: 1,
+            },
+            AccountSection {
+                name: "alpha".to_string(),
+                start: 1,
+                count: 1,
+            },
+            AccountSection {
+                name: "bravo".to_string(),
+                start: 2,
+                count: 1,
+            },
+        ];
+
+        resort_sections(&mut app);
+
+        assert_eq!(app.sections[0].name, "alpha");
+        assert_eq!(app.sections[1].name, "bravo");
+        assert_eq!(app.sections[2].name, "charlie");
+        assert_eq!(app.envelopes[0].account, "alpha");
+        assert_eq!(app.envelopes[1].account, "bravo");
+        assert_eq!(app.envelopes[2].account, "charlie");
+    }
+
+    #[test]
+    fn resort_sections_single_section_noop() {
+        let mut app = App::new(
+            vec![make_envelope_for("1", "A", "only")],
+            "INBOX".to_string(),
+        );
+        app.sections = vec![AccountSection {
+            name: "only".to_string(),
+            start: 0,
+            count: 1,
+        }];
+
+        resort_sections(&mut app);
+
+        assert_eq!(app.sections.len(), 1);
+        assert_eq!(app.envelopes.len(), 1);
+    }
+
+    #[test]
+    fn resort_sections_clamps_selection() {
+        let mut app = App::new(
+            vec![
+                make_envelope_for("b1", "B", "bravo"),
+                make_envelope_for("a1", "A", "alpha"),
+            ],
+            "INBOX".to_string(),
+        );
+        app.sections = vec![
+            AccountSection {
+                name: "bravo".to_string(),
+                start: 0,
+                count: 1,
+            },
+            AccountSection {
+                name: "alpha".to_string(),
+                start: 1,
+                count: 1,
+            },
+        ];
+        app.selected = 5; // out of bounds
+
+        resort_sections(&mut app);
+
+        assert_eq!(app.selected, 1); // clamped to len - 1
+    }
+
+    // ---- sync_folder_envelope_cache ----
+
+    #[test]
+    fn sync_folder_envelope_cache_updates_cache() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
+        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
+            envelopes,
+            selected: 0,
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+            parent: make_folder_list_state(),
+        });
+
+        sync_folder_envelope_cache(&mut app);
+
+        let cached = app
+            .cache
+            .folder_envelopes
+            .get(&("work".to_string(), "Sent".to_string()))
+            .unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].id, "1");
+        assert_eq!(cached[1].id, "2");
+    }
+
+    #[test]
+    fn sync_folder_envelope_cache_noop_on_other_views() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        // View is EnvelopeList, not FolderEnvelopeList
+        sync_folder_envelope_cache(&mut app);
+        assert!(app.cache.folder_envelopes.is_empty());
+    }
+}

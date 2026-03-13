@@ -22,6 +22,7 @@ pub fn sort_flags(flags: &str) -> String {
 }
 
 /// Owned envelope data extracted from pimalaya_tui's Envelope type.
+#[derive(Clone)]
 pub struct EnvelopeData {
     pub id: String,
     pub subject: String,
@@ -81,11 +82,13 @@ impl From<&Envelope> for EnvelopeData {
     }
 }
 
+#[derive(Clone)]
 pub struct FolderEntry {
     pub name: String,
     pub account: String,
 }
 
+#[derive(Clone)]
 pub struct FolderSection {
     pub name: String,
     pub start: usize,
@@ -98,6 +101,7 @@ pub struct SearchState {
     pub selected: usize,
 }
 
+#[derive(Clone)]
 pub struct FolderListState {
     pub folders: Vec<FolderEntry>,
     pub sections: Vec<FolderSection>,
@@ -105,6 +109,7 @@ pub struct FolderListState {
     pub saved_envelope_selected: usize,
 }
 
+#[derive(Clone)]
 pub struct FolderEnvelopeState {
     pub envelopes: Vec<EnvelopeData>,
     pub selected: usize,
@@ -172,6 +177,14 @@ pub struct App {
     pub should_quit: bool,
     pub status: Option<Status>,
     pub search: Option<SearchState>,
+    /// Number of pending refresh operations (for multi-account incremental loading).
+    pub pending_refreshes: usize,
+    /// Context for marking a message as seen on the server after loading.
+    /// Tuple of (account_key, folder, envelope_id).
+    pub last_read_context: Option<(String, String, String)>,
+    /// Set when a mutation (delete/archive/move) was performed since the last
+    /// full refresh, so BackToList knows to re-fetch from the server.
+    pub envelopes_stale: bool,
 }
 
 impl App {
@@ -185,9 +198,13 @@ impl App {
             should_quit: false,
             status: None,
             search: None,
+            pending_refreshes: 0,
+            last_read_context: None,
+            envelopes_stale: false,
         }
     }
 
+    #[cfg(test)]
     pub fn with_sections(mut self, sections: Vec<AccountSection>) -> Self {
         self.sections = sections;
         self

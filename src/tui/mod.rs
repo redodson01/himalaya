@@ -25,7 +25,8 @@ use crate::config::TomlConfig;
 
 use self::app::{
     sort_flags, AccountPickerState, AccountSection, App, EnvelopeData, FolderContext, FolderEntry,
-    FolderListState, FolderSection, MoveFolderPickerState, SavedListState, Status, View,
+    FolderListState, FolderSection, MoveFolderPickerState, SavedListState, Status, UndoAction,
+    View,
 };
 use self::event::{handle_event, Action};
 
@@ -92,8 +93,13 @@ enum BackendResult {
         account_key: String,
     },
 
-    // Mutation succeeded — clears the "Working…" status.
-    MutationDone,
+    // Mutation succeeded — clears the "Working…" status and optionally
+    // pushes an undo/redo entry. Entries are only created on success so
+    // that we never accumulate stale actions for failed operations.
+    MutationDone {
+        undo_action: Box<Option<UndoAction>>,
+        redo_action: Box<Option<UndoAction>>,
+    },
 
     // Errors
     Error {
@@ -101,6 +107,9 @@ enum BackendResult {
         /// When true, this error came from a mutation (delete/archive/move/flag)
         /// that was optimistically applied — the UI should auto-refresh to recover.
         needs_refresh: bool,
+        /// When present, locally reverts the optimistic update instead of doing a
+        /// full server refresh. This avoids clobbering other in-flight mutations.
+        revert_action: Box<Option<UndoAction>>,
     },
 }
 
@@ -168,6 +177,7 @@ fn spawn_backend_connect(
                 let _ = tx.send(BackendResult::Error {
                     message: format!("Failed to connect {account_name}: {e}"),
                     needs_refresh: false,
+                    revert_action: Box::new(None),
                 });
             }
         }
@@ -319,7 +329,6 @@ fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
 
 /// Find an envelope by ID in app.envelopes and apply a mutation to it.
 /// Returns true if found.
-#[allow(dead_code)]
 fn mutate_envelope_by_id(app: &mut App, id: &str, f: impl Fn(&mut EnvelopeData)) -> bool {
     if let Some(env) = app.envelopes.iter_mut().find(|e| e.id == id) {
         f(env);
@@ -360,6 +369,7 @@ fn spawn_refresh_envelope_list(backends: &BackendMap, tx: &mpsc::UnboundedSender
                     let _ = tx.send(BackendResult::Error {
                         message: format!("Refresh failed: {e}"),
                         needs_refresh: false,
+                        revert_action: Box::new(None),
                     });
                 }
             }
@@ -412,6 +422,7 @@ fn apply_backend_result(
                         let _ = tx.send(BackendResult::Error {
                             message: format!("Failed to load envelopes for {account_clone}: {e}"),
                             needs_refresh: false,
+                            revert_action: Box::new(None),
                         });
                     }
                 }
@@ -592,9 +603,24 @@ fn apply_backend_result(
                 });
             }
         }
-        BackendResult::MutationDone => {
+        BackendResult::MutationDone {
+            undo_action,
+            redo_action,
+        } => {
             if matches!(app.status, Some(Status::Working(_))) {
                 app.status = None;
+            }
+            if let Some(action) = *undo_action {
+                app.undo_stack.push_back(action);
+                while app.undo_stack.len() > app::UNDO_STACK_LIMIT {
+                    app.undo_stack.pop_front();
+                }
+            }
+            if let Some(action) = *redo_action {
+                app.redo_stack.push_back(action);
+                while app.redo_stack.len() > app::UNDO_STACK_LIMIT {
+                    app.redo_stack.pop_front();
+                }
             }
             if app.envelopes_stale {
                 start_full_refresh(app, backends, tx);
@@ -603,13 +629,189 @@ fn apply_backend_result(
         BackendResult::Error {
             message,
             needs_refresh,
+            revert_action,
         } => {
             app.status = Some(Status::Error(message));
             app.pending_refreshes = app.pending_refreshes.saturating_sub(1);
-            if needs_refresh {
+            app.undo_on_complete = false;
+            app.redo_on_complete = false;
+            if let Some(action) = *revert_action {
+                apply_local_revert(app, action);
+            } else if needs_refresh {
                 start_full_refresh(app, backends, tx);
             }
         }
+    }
+}
+
+/// Locally revert an optimistic mutation using the data from the UndoAction.
+fn apply_local_revert(app: &mut App, action: UndoAction) {
+    match action {
+        UndoAction::Delete {
+            envelope, index, ..
+        }
+        | UndoAction::Archive {
+            envelope, index, ..
+        }
+        | UndoAction::Move {
+            envelope, index, ..
+        } => {
+            app.insert_envelope(index, envelope);
+        }
+        UndoAction::ToggleRead {
+            envelope_id,
+            was_unseen,
+            ..
+        } => {
+            mutate_envelope_by_id(app, &envelope_id, |env| {
+                env.unseen = was_unseen;
+                if was_unseen {
+                    env.flags = env.flags.replace('S', "");
+                } else if !env.flags.contains('S') {
+                    env.flags = sort_flags(&format!("S{}", env.flags));
+                }
+            });
+        }
+        UndoAction::ToggleFlag {
+            envelope_id,
+            was_flagged,
+            ..
+        } => {
+            mutate_envelope_by_id(app, &envelope_id, |env| {
+                if was_flagged {
+                    if !env.flags.contains('F') {
+                        env.flags = sort_flags(&format!("F{}", env.flags));
+                    }
+                } else {
+                    env.flags = env.flags.replace('F', "");
+                }
+            });
+        }
+    }
+}
+
+/// The backend operation to perform for a move reversal (undo/redo of
+/// Delete, Archive, or Move).
+enum ReversalOp {
+    Move { from: String, to: String },
+    Delete { folder: String },
+}
+
+/// Spawn an async task that reverses a move-type mutation (Delete, Archive, Move).
+fn spawn_move_reversal(
+    backend: Arc<Backend>,
+    tx: mpsc::UnboundedSender<BackendResult>,
+    dest_id: Option<Vec<String>>,
+    op: ReversalOp,
+    error_prefix: &str,
+    build_result: impl FnOnce(Option<Vec<String>>) -> UndoAction + Send + 'static,
+    is_undo: bool,
+) {
+    let error_prefix = error_prefix.to_string();
+    let not_supported_msg = if is_undo {
+        "Undo not supported — server did not return destination ID"
+    } else {
+        "Redo not supported — server did not return destination ID"
+    };
+    tokio::spawn(async move {
+        let Some(ref dest_ids) = dest_id else {
+            let _ = tx.send(BackendResult::Error {
+                message: not_supported_msg.to_string(),
+                needs_refresh: true,
+                revert_action: Box::new(None),
+            });
+            return;
+        };
+        let Some(id) = dest_ids.first().and_then(|s| s.parse::<usize>().ok()) else {
+            let _ = tx.send(BackendResult::Error {
+                message: format!("{error_prefix}: invalid destination ID"),
+                needs_refresh: true,
+                revert_action: Box::new(None),
+            });
+            return;
+        };
+        let result = match &op {
+            ReversalOp::Move { from, to } => backend.move_messages(from, to, &[id]).await,
+            ReversalOp::Delete { folder } => backend.delete_messages(folder, &[id]).await,
+        };
+        match result {
+            Ok(new_dest_ids) => {
+                let action = build_result(new_dest_ids);
+                let (undo_action, redo_action) = if is_undo {
+                    (Box::new(None), Box::new(Some(action)))
+                } else {
+                    (Box::new(Some(action)), Box::new(None))
+                };
+                let _ = tx.send(BackendResult::MutationDone {
+                    undo_action,
+                    redo_action,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(BackendResult::Error {
+                    message: format!("{error_prefix}: {e}"),
+                    needs_refresh: true,
+                    revert_action: Box::new(None),
+                });
+            }
+        }
+    });
+}
+
+/// Parameters for a flag reversal operation.
+struct FlagReversalParams {
+    flag: Flag,
+    add: bool,
+    error_prefix: &'static str,
+    result_action: UndoAction,
+    is_undo: bool,
+}
+
+/// Spawn an async task that reverses a flag mutation (ToggleRead, ToggleFlag).
+fn spawn_flag_reversal(
+    backend: Arc<Backend>,
+    tx: mpsc::UnboundedSender<BackendResult>,
+    folder: String,
+    envelope_id: &str,
+    params: FlagReversalParams,
+) {
+    let error_prefix = params.error_prefix;
+    if let Ok(id) = envelope_id.parse::<usize>() {
+        let FlagReversalParams {
+            flag,
+            add,
+            result_action,
+            is_undo,
+            ..
+        } = params;
+        tokio::spawn(async move {
+            let flags = Flags::from_iter([flag]);
+            let result = if add {
+                backend.add_flags(&folder, &[id], &flags).await
+            } else {
+                backend.remove_flags(&folder, &[id], &flags).await
+            };
+            match result {
+                Ok(_) => {
+                    let (undo_action, redo_action) = if is_undo {
+                        (Box::new(None), Box::new(Some(result_action)))
+                    } else {
+                        (Box::new(Some(result_action)), Box::new(None))
+                    };
+                    let _ = tx.send(BackendResult::MutationDone {
+                        undo_action,
+                        redo_action,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BackendResult::Error {
+                        message: format!("{error_prefix}: {e}"),
+                        needs_refresh: true,
+                        revert_action: Box::new(None),
+                    });
+                }
+            }
+        });
     }
 }
 
@@ -886,9 +1088,13 @@ async fn handle_edit_message(
                         let _ = tx.send(BackendResult::Error {
                             message: format!("Draft cleanup failed: {e}"),
                             needs_refresh: false,
+                            revert_action: Box::new(None),
                         });
                     } else {
-                        let _ = tx.send(BackendResult::MutationDone);
+                        let _ = tx.send(BackendResult::MutationDone {
+                            undo_action: Box::new(None),
+                            redo_action: Box::new(None),
+                        });
                     }
                 });
             }
@@ -947,6 +1153,7 @@ fn start_full_refresh(
                             let _ = tx.send(BackendResult::Error {
                                 message: format!("Error refreshing folder: {e}"),
                                 needs_refresh: false,
+                                revert_action: Box::new(None),
                             });
                         }
                     }
@@ -980,7 +1187,10 @@ async fn run_event_loop(
                         tokio::spawn(async move {
                             let seen = Flags::from_iter([Flag::Seen]);
                             let _ = backend.add_flags(&folder, &[id], &seen).await;
-                            let _ = tx.send(BackendResult::MutationDone);
+                            let _ = tx.send(BackendResult::MutationDone {
+                                undo_action: Box::new(None),
+                                redo_action: Box::new(None),
+                            });
                         });
                     }
                 }
@@ -988,11 +1198,28 @@ async fn run_event_loop(
             }
         }
 
-        // 2. Check for user input (100ms poll)
-        let mut action = handle_event(&app.view, &app.folder_context, app.search.is_some())?;
+        // 1b. If an undo/redo was deferred while a mutation was in-flight,
+        //     fire it now that MutationDone has been processed.
+        let deferred = if app.undo_on_complete && !matches!(app.status, Some(Status::Working(_))) {
+            app.undo_on_complete = false;
+            Some(Action::Undo)
+        } else if app.redo_on_complete && !matches!(app.status, Some(Status::Working(_))) {
+            app.redo_on_complete = false;
+            Some(Action::Redo)
+        } else {
+            None
+        };
 
-        // Clear transient status on any keypress
-        if !matches!(action, Action::None)
+        // 2. Check for user input (100ms poll)
+        let mut action = if let Some(act) = deferred {
+            act
+        } else {
+            handle_event(&app.view, &app.folder_context, app.search.is_some())?
+        };
+
+        // Clear transient status on any keypress, but preserve "Working…"
+        // status for undo/redo so the in-flight mutation check works.
+        if !matches!(action, Action::None | Action::Undo | Action::Redo)
             && app.status.is_some()
             && (app.pending_refreshes == 0 || !matches!(app.status, Some(Status::Working(_))))
         {
@@ -1158,29 +1385,56 @@ async fn run_event_loop(
                     if let Some(ctx) = active_envelope_context(app, default_account) {
                         let (id_str, account_key, folder) = (ctx.id, ctx.account_key, ctx.folder);
 
+                        let undo_index = app.selected;
+                        let undo_envelope = app.envelopes.get(app.selected).cloned();
+
                         // Optimistic local update
                         app.remove_envelope(app.selected);
                         if !matches!(app.view, View::MessageList) {
                             app.view = View::MessageList;
                         }
 
+                        app.redo_stack.clear();
                         app.status = Some(Status::Working("Deleting…".to_string()));
                         app.envelopes_stale = true;
+
+                        let undo_envelope_data = undo_envelope.clone();
 
                         if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
                             if let Ok(id) = id_str.parse::<usize>() {
                                 let tx = tx.clone();
                                 let backend = backend.clone();
                                 let folder = folder.clone();
+                                let account_key = account_key.clone();
+                                let revert = undo_envelope.map(|envelope| UndoAction::Delete {
+                                    envelope,
+                                    index: undo_index,
+                                    account_key: account_key.clone(),
+                                    folder: folder.clone(),
+                                    dest_id: None,
+                                });
                                 tokio::spawn(async move {
                                     match backend.delete_messages(&folder, &[id]).await {
-                                        Ok(_) => {
-                                            let _ = tx.send(BackendResult::MutationDone);
+                                        Ok(dest_ids) => {
+                                            let undo_action = undo_envelope_data.map(|envelope| {
+                                                UndoAction::Delete {
+                                                    envelope,
+                                                    index: undo_index,
+                                                    account_key: account_key.clone(),
+                                                    folder: folder.clone(),
+                                                    dest_id: dest_ids,
+                                                }
+                                            });
+                                            let _ = tx.send(BackendResult::MutationDone {
+                                                undo_action: Box::new(undo_action),
+                                                redo_action: Box::new(None),
+                                            });
                                         }
                                         Err(e) => {
                                             let _ = tx.send(BackendResult::Error {
                                                 message: format!("Delete failed: {e}"),
                                                 needs_refresh: true,
+                                                revert_action: Box::new(revert),
                                             });
                                         }
                                     }
@@ -1191,6 +1445,15 @@ async fn run_event_loop(
                 }
                 Action::ToggleRead => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
+                        app.redo_stack.clear();
+
+                        let undo_action = UndoAction::ToggleRead {
+                            envelope_id: ctx.id.clone(),
+                            account_key: ctx.account_key.clone(),
+                            folder: ctx.folder.clone(),
+                            was_unseen: ctx.unseen,
+                        };
+
                         if let Some(env) = active_envelope_mut(app) {
                             if ctx.unseen {
                                 env.unseen = false;
@@ -1213,6 +1476,7 @@ async fn run_event_loop(
                                 let backend = backend.clone();
                                 let folder = ctx.folder.clone();
                                 let was_unseen = ctx.unseen;
+                                let revert = undo_action.clone();
                                 tokio::spawn(async move {
                                     let seen = Flags::from_iter([Flag::Seen]);
                                     let result = if was_unseen {
@@ -1222,12 +1486,16 @@ async fn run_event_loop(
                                     };
                                     match result {
                                         Ok(_) => {
-                                            let _ = tx.send(BackendResult::MutationDone);
+                                            let _ = tx.send(BackendResult::MutationDone {
+                                                undo_action: Box::new(Some(undo_action)),
+                                                redo_action: Box::new(None),
+                                            });
                                         }
                                         Err(e) => {
                                             let _ = tx.send(BackendResult::Error {
                                                 message: format!("Toggle read failed: {e}"),
                                                 needs_refresh: true,
+                                                revert_action: Box::new(Some(revert)),
                                             });
                                         }
                                     }
@@ -1238,6 +1506,15 @@ async fn run_event_loop(
                 }
                 Action::ToggleFlag => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
+                        app.redo_stack.clear();
+
+                        let undo_action = UndoAction::ToggleFlag {
+                            envelope_id: ctx.id.clone(),
+                            account_key: ctx.account_key.clone(),
+                            folder: ctx.folder.clone(),
+                            was_flagged: ctx.flagged,
+                        };
+
                         if let Some(env) = active_envelope_mut(app) {
                             env.flagged = !ctx.flagged;
                             if ctx.flagged {
@@ -1257,6 +1534,7 @@ async fn run_event_loop(
                                 let backend = backend.clone();
                                 let folder = ctx.folder.clone();
                                 let was_flagged = ctx.flagged;
+                                let revert = undo_action.clone();
                                 tokio::spawn(async move {
                                     let flagged = Flags::from_iter([Flag::Flagged]);
                                     let result = if was_flagged {
@@ -1266,12 +1544,16 @@ async fn run_event_loop(
                                     };
                                     match result {
                                         Ok(_) => {
-                                            let _ = tx.send(BackendResult::MutationDone);
+                                            let _ = tx.send(BackendResult::MutationDone {
+                                                undo_action: Box::new(Some(undo_action)),
+                                                redo_action: Box::new(None),
+                                            });
                                         }
                                         Err(e) => {
                                             let _ = tx.send(BackendResult::Error {
                                                 message: format!("Flag toggle failed: {e}"),
                                                 needs_refresh: true,
+                                                revert_action: Box::new(Some(revert)),
                                             });
                                         }
                                     }
@@ -1348,6 +1630,7 @@ async fn run_event_loop(
                                     let _ = tx.send(BackendResult::Error {
                                         message: format!("Error loading folders for {key}: {e}"),
                                         needs_refresh: false,
+                                        revert_action: Box::new(None),
                                     });
                                     return;
                                 }
@@ -1469,6 +1752,7 @@ async fn run_event_loop(
                                         let _ = tx.send(BackendResult::Error {
                                             message: format!("Error loading envelopes: {e}"),
                                             needs_refresh: false,
+                                            revert_action: Box::new(None),
                                         });
                                     }
                                 }
@@ -1509,6 +1793,9 @@ async fn run_event_loop(
                         let (id_str, account_key, source_folder) =
                             (ctx.id, ctx.account_key, ctx.folder);
 
+                        let undo_index = app.selected;
+                        let undo_envelope = app.envelopes.get(app.selected).cloned();
+
                         // Optimistic local update
                         app.remove_envelope(app.selected);
                         if !matches!(app.view, View::MessageList) {
@@ -1517,6 +1804,8 @@ async fn run_event_loop(
                         app.status = Some(Status::Working("Archiving…".to_string()));
                         app.envelopes_stale = true;
 
+                        app.redo_stack.clear();
+
                         if let Some((backend, _, _, archive_folder, _)) = backends.get(&account_key)
                         {
                             if let Ok(id) = id_str.parse::<usize>() {
@@ -1524,18 +1813,41 @@ async fn run_event_loop(
                                 let backend = backend.clone();
                                 let source_folder = source_folder.clone();
                                 let archive_folder = archive_folder.clone();
+                                let account_key = account_key.clone();
+                                let revert =
+                                    undo_envelope.as_ref().map(|envelope| UndoAction::Archive {
+                                        envelope: envelope.clone(),
+                                        index: undo_index,
+                                        account_key: account_key.clone(),
+                                        source_folder: source_folder.clone(),
+                                        archive_folder: archive_folder.clone(),
+                                        dest_id: None,
+                                    });
                                 tokio::spawn(async move {
                                     match backend
                                         .move_messages(&source_folder, &archive_folder, &[id])
                                         .await
                                     {
-                                        Ok(_) => {
-                                            let _ = tx.send(BackendResult::MutationDone);
+                                        Ok(dest_ids) => {
+                                            let undo_action =
+                                                undo_envelope.map(|envelope| UndoAction::Archive {
+                                                    envelope,
+                                                    index: undo_index,
+                                                    account_key: account_key.clone(),
+                                                    source_folder: source_folder.clone(),
+                                                    archive_folder: archive_folder.clone(),
+                                                    dest_id: dest_ids,
+                                                });
+                                            let _ = tx.send(BackendResult::MutationDone {
+                                                undo_action: Box::new(undo_action),
+                                                redo_action: Box::new(None),
+                                            });
                                         }
                                         Err(e) => {
                                             let _ = tx.send(BackendResult::Error {
                                                 message: format!("Archive failed: {e}"),
                                                 needs_refresh: true,
+                                                revert_action: Box::new(revert),
                                             });
                                         }
                                     }
@@ -1589,6 +1901,7 @@ async fn run_event_loop(
                                         let _ = tx.send(BackendResult::Error {
                                             message: format!("Error loading folders: {e}"),
                                             needs_refresh: false,
+                                            revert_action: Box::new(None),
                                         });
                                     }
                                 }
@@ -1605,10 +1918,13 @@ async fn run_event_loop(
                             let account_key = state.account_key.clone();
                             let source_envelope_index = state.source_envelope_index;
 
+                            let undo_envelope = app.envelopes.get(source_envelope_index).cloned();
+
                             // Optimistic local update
                             app.view = View::MessageList;
                             app.remove_envelope(source_envelope_index);
 
+                            app.redo_stack.clear();
                             app.status = Some(Status::Working(format!("Moved to {target_name}")));
                             app.envelopes_stale = true;
 
@@ -1617,7 +1933,17 @@ async fn run_event_loop(
                                     let tx = tx.clone();
                                     let backend = backend.clone();
                                     let target_name_clone = target_name.clone();
+                                    let account_key = account_key.clone();
                                     let source_folder = source_folder.clone();
+                                    let revert =
+                                        undo_envelope.as_ref().map(|envelope| UndoAction::Move {
+                                            envelope: envelope.clone(),
+                                            index: source_envelope_index,
+                                            account_key: account_key.clone(),
+                                            source_folder: source_folder.clone(),
+                                            target_folder: target_name_clone.clone(),
+                                            dest_id: None,
+                                        });
                                     tokio::spawn(async move {
                                         match backend
                                             .move_messages(
@@ -1627,13 +1953,27 @@ async fn run_event_loop(
                                             )
                                             .await
                                         {
-                                            Ok(_) => {
-                                                let _ = tx.send(BackendResult::MutationDone);
+                                            Ok(dest_ids) => {
+                                                let undo_action = undo_envelope.map(|envelope| {
+                                                    UndoAction::Move {
+                                                        envelope,
+                                                        index: source_envelope_index,
+                                                        account_key: account_key.clone(),
+                                                        source_folder: source_folder.clone(),
+                                                        target_folder: target_name_clone.clone(),
+                                                        dest_id: dest_ids,
+                                                    }
+                                                });
+                                                let _ = tx.send(BackendResult::MutationDone {
+                                                    undo_action: Box::new(undo_action),
+                                                    redo_action: Box::new(None),
+                                                });
                                             }
                                             Err(e) => {
                                                 let _ = tx.send(BackendResult::Error {
                                                     message: format!("Move failed: {e}"),
                                                     needs_refresh: true,
+                                                    revert_action: Box::new(revert),
                                                 });
                                             }
                                         }
@@ -1641,6 +1981,500 @@ async fn run_event_loop(
                                 }
                             }
                         }
+                    }
+                }
+                Action::Undo => {
+                    if matches!(app.status, Some(Status::Working(_))) {
+                        app.set_deferred_undo();
+                        app.status = Some(Status::Working("Will undo when complete…".to_string()));
+                        break;
+                    }
+                    if let Some(undo_action) = app.undo_stack.pop_back() {
+                        match undo_action {
+                            UndoAction::Delete {
+                                envelope,
+                                index,
+                                account_key,
+                                folder,
+                                dest_id,
+                            } => {
+                                // Check if undo's folder matches current context
+                                let matches_context = match &app.folder_context {
+                                    FolderContext::AllInboxes => true,
+                                    FolderContext::SingleFolder {
+                                        folder_name: f,
+                                        account_key: a,
+                                    } => *f == folder && *a == account_key,
+                                };
+                                if matches_context {
+                                    app.insert_envelope(index, envelope.clone());
+                                }
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::MessageList;
+                                }
+                                app.envelopes_stale = true;
+                                app.status = Some(Status::Working("Undoing delete…".to_string()));
+                                if let Some((backend, account_config, _, _, _)) =
+                                    backends.get(&account_key)
+                                {
+                                    let trash_folder = account_config.get_trash_folder_alias();
+                                    let envelope = envelope.clone();
+                                    let account_key = account_key.clone();
+                                    let folder = folder.clone();
+                                    spawn_move_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        dest_id,
+                                        ReversalOp::Move {
+                                            from: trash_folder,
+                                            to: folder.clone(),
+                                        },
+                                        "Undo delete failed",
+                                        move |new_dest_ids| UndoAction::Delete {
+                                            envelope,
+                                            index,
+                                            account_key,
+                                            folder,
+                                            dest_id: new_dest_ids,
+                                        },
+                                        true,
+                                    );
+                                }
+                            }
+                            UndoAction::Archive {
+                                envelope,
+                                index,
+                                account_key,
+                                source_folder,
+                                archive_folder,
+                                dest_id,
+                            } => {
+                                let matches_context = match &app.folder_context {
+                                    FolderContext::AllInboxes => true,
+                                    FolderContext::SingleFolder {
+                                        folder_name: f,
+                                        account_key: a,
+                                    } => *f == source_folder && *a == account_key,
+                                };
+                                if matches_context {
+                                    app.insert_envelope(index, envelope.clone());
+                                }
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::MessageList;
+                                }
+                                app.envelopes_stale = true;
+                                app.status = Some(Status::Working("Undoing archive…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let envelope = envelope.clone();
+                                    let account_key = account_key.clone();
+                                    let source_folder = source_folder.clone();
+                                    let archive_folder = archive_folder.clone();
+                                    spawn_move_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        dest_id,
+                                        ReversalOp::Move {
+                                            from: archive_folder.clone(),
+                                            to: source_folder.clone(),
+                                        },
+                                        "Undo archive failed",
+                                        move |new_dest_ids| UndoAction::Archive {
+                                            envelope,
+                                            index,
+                                            account_key,
+                                            source_folder,
+                                            archive_folder,
+                                            dest_id: new_dest_ids,
+                                        },
+                                        true,
+                                    );
+                                }
+                            }
+                            UndoAction::Move {
+                                envelope,
+                                index,
+                                account_key,
+                                source_folder,
+                                target_folder,
+                                dest_id,
+                            } => {
+                                let matches_context = match &app.folder_context {
+                                    FolderContext::AllInboxes => true,
+                                    FolderContext::SingleFolder {
+                                        folder_name: f,
+                                        account_key: a,
+                                    } => *f == source_folder && *a == account_key,
+                                };
+                                if matches_context {
+                                    app.insert_envelope(index, envelope.clone());
+                                }
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::MessageList;
+                                }
+                                app.envelopes_stale = true;
+                                app.status = Some(Status::Working("Undoing move…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let envelope = envelope.clone();
+                                    let account_key = account_key.clone();
+                                    let source_folder = source_folder.clone();
+                                    let target_folder = target_folder.clone();
+                                    spawn_move_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        dest_id,
+                                        ReversalOp::Move {
+                                            from: target_folder.clone(),
+                                            to: source_folder.clone(),
+                                        },
+                                        "Undo move failed",
+                                        move |new_dest_ids| UndoAction::Move {
+                                            envelope,
+                                            index,
+                                            account_key,
+                                            source_folder,
+                                            target_folder,
+                                            dest_id: new_dest_ids,
+                                        },
+                                        true,
+                                    );
+                                }
+                            }
+                            UndoAction::ToggleRead {
+                                envelope_id,
+                                account_key,
+                                folder,
+                                was_unseen,
+                            } => {
+                                mutate_envelope_by_id(app, &envelope_id, |env| {
+                                    env.unseen = was_unseen;
+                                    if was_unseen {
+                                        env.flags = env.flags.replace('S', "");
+                                    } else if !env.flags.contains('S') {
+                                        env.flags = sort_flags(&format!("S{}", env.flags));
+                                    }
+                                });
+                                app.status =
+                                    Some(Status::Working("Undoing read toggle…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let eid = envelope_id.clone();
+                                    spawn_flag_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        folder.clone(),
+                                        &eid,
+                                        FlagReversalParams {
+                                            flag: Flag::Seen,
+                                            add: !was_unseen,
+                                            error_prefix: "Undo toggle read failed",
+                                            result_action: UndoAction::ToggleRead {
+                                                envelope_id,
+                                                account_key,
+                                                folder,
+                                                was_unseen,
+                                            },
+                                            is_undo: true,
+                                        },
+                                    );
+                                }
+                            }
+                            UndoAction::ToggleFlag {
+                                envelope_id,
+                                account_key,
+                                folder,
+                                was_flagged,
+                            } => {
+                                mutate_envelope_by_id(app, &envelope_id, |env| {
+                                    env.flagged = was_flagged;
+                                    if was_flagged {
+                                        if !env.flags.contains('F') {
+                                            env.flags = sort_flags(&format!("F{}", env.flags));
+                                        }
+                                    } else {
+                                        env.flags = env.flags.replace('F', "");
+                                    }
+                                });
+                                app.status =
+                                    Some(Status::Working("Undoing flag toggle…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let eid = envelope_id.clone();
+                                    spawn_flag_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        folder.clone(),
+                                        &eid,
+                                        FlagReversalParams {
+                                            flag: Flag::Flagged,
+                                            add: was_flagged,
+                                            error_prefix: "Undo flag toggle failed",
+                                            result_action: UndoAction::ToggleFlag {
+                                                envelope_id,
+                                                account_key,
+                                                folder,
+                                                was_flagged,
+                                            },
+                                            is_undo: true,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        app.status = Some(Status::Error("Nothing to undo".to_string()));
+                    }
+                }
+                Action::Redo => {
+                    if matches!(app.status, Some(Status::Working(_))) {
+                        app.set_deferred_redo();
+                        app.status = Some(Status::Working("Will redo when complete…".to_string()));
+                        break;
+                    }
+                    if let Some(redo_action) = app.redo_stack.pop_back() {
+                        match redo_action {
+                            UndoAction::Delete {
+                                envelope,
+                                index,
+                                account_key,
+                                folder,
+                                dest_id,
+                            } => {
+                                let env_id = envelope.id.clone();
+                                let dest_id_str = dest_id
+                                    .as_ref()
+                                    .and_then(|ids| ids.first())
+                                    .map(|id| id.to_string());
+                                let (undo_envelope, undo_index) = if let Some(pos) =
+                                    app.envelopes.iter().position(|e| {
+                                        e.id == env_id
+                                            || dest_id_str.as_ref().is_some_and(|did| e.id == *did)
+                                    }) {
+                                    (
+                                        app.remove_envelope(pos)
+                                            .unwrap_or_else(|| envelope.clone()),
+                                        pos,
+                                    )
+                                } else {
+                                    (envelope.clone(), index)
+                                };
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::MessageList;
+                                }
+                                app.envelopes_stale = true;
+                                app.status = Some(Status::Working("Redoing delete…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let account_key = account_key.clone();
+                                    let folder = folder.clone();
+                                    spawn_move_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        dest_id,
+                                        ReversalOp::Delete {
+                                            folder: folder.clone(),
+                                        },
+                                        "Redo delete failed",
+                                        move |new_dest_ids| UndoAction::Delete {
+                                            envelope: undo_envelope,
+                                            index: undo_index,
+                                            account_key,
+                                            folder,
+                                            dest_id: new_dest_ids,
+                                        },
+                                        false,
+                                    );
+                                }
+                            }
+                            UndoAction::Archive {
+                                envelope,
+                                index,
+                                account_key,
+                                source_folder,
+                                archive_folder,
+                                dest_id,
+                            } => {
+                                let env_id = envelope.id.clone();
+                                let dest_id_str = dest_id
+                                    .as_ref()
+                                    .and_then(|ids| ids.first())
+                                    .map(|id| id.to_string());
+                                let (undo_envelope, undo_index) = if let Some(pos) =
+                                    app.envelopes.iter().position(|e| {
+                                        e.id == env_id
+                                            || dest_id_str.as_ref().is_some_and(|did| e.id == *did)
+                                    }) {
+                                    (
+                                        app.remove_envelope(pos)
+                                            .unwrap_or_else(|| envelope.clone()),
+                                        pos,
+                                    )
+                                } else {
+                                    (envelope.clone(), index)
+                                };
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::MessageList;
+                                }
+                                app.envelopes_stale = true;
+                                app.status = Some(Status::Working("Redoing archive…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let account_key = account_key.clone();
+                                    let source_folder = source_folder.clone();
+                                    let archive_folder = archive_folder.clone();
+                                    spawn_move_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        dest_id,
+                                        ReversalOp::Move {
+                                            from: source_folder.clone(),
+                                            to: archive_folder.clone(),
+                                        },
+                                        "Redo archive failed",
+                                        move |new_dest_ids| UndoAction::Archive {
+                                            envelope: undo_envelope,
+                                            index: undo_index,
+                                            account_key,
+                                            source_folder,
+                                            archive_folder,
+                                            dest_id: new_dest_ids,
+                                        },
+                                        false,
+                                    );
+                                }
+                            }
+                            UndoAction::Move {
+                                envelope,
+                                index,
+                                account_key,
+                                source_folder,
+                                target_folder,
+                                dest_id,
+                            } => {
+                                let env_id = envelope.id.clone();
+                                let dest_id_str = dest_id
+                                    .as_ref()
+                                    .and_then(|ids| ids.first())
+                                    .map(|id| id.to_string());
+                                let (undo_envelope, undo_index) = if let Some(pos) =
+                                    app.envelopes.iter().position(|e| {
+                                        e.id == env_id
+                                            || dest_id_str.as_ref().is_some_and(|did| e.id == *did)
+                                    }) {
+                                    (
+                                        app.remove_envelope(pos)
+                                            .unwrap_or_else(|| envelope.clone()),
+                                        pos,
+                                    )
+                                } else {
+                                    (envelope.clone(), index)
+                                };
+                                if matches!(app.view, View::MessageRead { .. }) {
+                                    app.view = View::MessageList;
+                                }
+                                app.envelopes_stale = true;
+                                app.status = Some(Status::Working("Redoing move…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let account_key = account_key.clone();
+                                    let source_folder = source_folder.clone();
+                                    let target_folder = target_folder.clone();
+                                    spawn_move_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        dest_id,
+                                        ReversalOp::Move {
+                                            from: source_folder.clone(),
+                                            to: target_folder.clone(),
+                                        },
+                                        "Redo move failed",
+                                        move |new_dest_ids| UndoAction::Move {
+                                            envelope: undo_envelope,
+                                            index: undo_index,
+                                            account_key,
+                                            source_folder,
+                                            target_folder,
+                                            dest_id: new_dest_ids,
+                                        },
+                                        false,
+                                    );
+                                }
+                            }
+                            UndoAction::ToggleRead {
+                                envelope_id,
+                                account_key,
+                                folder,
+                                was_unseen,
+                            } => {
+                                mutate_envelope_by_id(app, &envelope_id, |env| {
+                                    env.unseen = !was_unseen;
+                                    if !was_unseen {
+                                        env.flags = env.flags.replace('S', "");
+                                    } else if !env.flags.contains('S') {
+                                        env.flags = sort_flags(&format!("S{}", env.flags));
+                                    }
+                                });
+                                app.status =
+                                    Some(Status::Working("Redoing read toggle…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let eid = envelope_id.clone();
+                                    spawn_flag_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        folder.clone(),
+                                        &eid,
+                                        FlagReversalParams {
+                                            flag: Flag::Seen,
+                                            add: was_unseen,
+                                            error_prefix: "Redo toggle read failed",
+                                            result_action: UndoAction::ToggleRead {
+                                                envelope_id,
+                                                account_key,
+                                                folder,
+                                                was_unseen,
+                                            },
+                                            is_undo: false,
+                                        },
+                                    );
+                                }
+                            }
+                            UndoAction::ToggleFlag {
+                                envelope_id,
+                                account_key,
+                                folder,
+                                was_flagged,
+                            } => {
+                                mutate_envelope_by_id(app, &envelope_id, |env| {
+                                    env.flagged = !was_flagged;
+                                    if !was_flagged {
+                                        if !env.flags.contains('F') {
+                                            env.flags = sort_flags(&format!("F{}", env.flags));
+                                        }
+                                    } else {
+                                        env.flags = env.flags.replace('F', "");
+                                    }
+                                });
+                                app.status =
+                                    Some(Status::Working("Redoing flag toggle…".to_string()));
+                                if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
+                                    let eid = envelope_id.clone();
+                                    spawn_flag_reversal(
+                                        backend.clone(),
+                                        tx.clone(),
+                                        folder.clone(),
+                                        &eid,
+                                        FlagReversalParams {
+                                            flag: Flag::Flagged,
+                                            add: !was_flagged,
+                                            error_prefix: "Redo flag toggle failed",
+                                            result_action: UndoAction::ToggleFlag {
+                                                envelope_id,
+                                                account_key,
+                                                folder,
+                                                was_flagged,
+                                            },
+                                            is_undo: false,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        app.status = Some(Status::Error("Nothing to redo".to_string()));
                     }
                 }
                 Action::EditMessage => {
@@ -2030,13 +2864,66 @@ mod tests {
     // ---- MutationDone ----
 
     #[test]
-    fn mutation_done_clears_status() {
+    fn mutation_done_pushes_undo_action() {
         let (mut backends, tx, _rx) = test_fixtures();
         let mut app = App::new(vec![], "INBOX".to_string());
         app.status = Some(Status::Working("Deleting…".to_string()));
 
-        apply_backend_result(&mut app, BackendResult::MutationDone, &mut backends, &tx);
+        let envelope = make_envelope("1", "test");
+        let undo = UndoAction::Delete {
+            envelope,
+            index: 0,
+            account_key: "work".to_string(),
+            folder: "INBOX".to_string(),
+            dest_id: Some(vec!["42".to_string()]),
+        };
 
+        apply_backend_result(
+            &mut app,
+            BackendResult::MutationDone {
+                undo_action: Box::new(Some(undo)),
+                redo_action: Box::new(None),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.undo_stack.len(), 1);
         assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn error_with_revert_applies_local_revert() {
+        let (mut backends, tx, _rx) = test_fixtures();
+        let mut app = App::new(vec![make_envelope("2", "b")], "INBOX".to_string());
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 1,
+        }];
+
+        let mut env = make_envelope("1", "a");
+        env.account = "work".to_string();
+        let revert = UndoAction::Delete {
+            envelope: env,
+            index: 0,
+            account_key: "work".to_string(),
+            folder: "INBOX".to_string(),
+            dest_id: None,
+        };
+
+        apply_backend_result(
+            &mut app,
+            BackendResult::Error {
+                message: "Delete failed".to_string(),
+                needs_refresh: false,
+                revert_action: Box::new(Some(revert)),
+            },
+            &mut backends,
+            &tx,
+        );
+
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.envelopes[0].id, "1");
     }
 }

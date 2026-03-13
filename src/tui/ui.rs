@@ -348,7 +348,11 @@ fn render_message_list(frame: &mut Frame, app: &App) {
                 Span::styled("\\", Style::default().fg(Color::Yellow)),
                 Span::raw(": folders | "),
                 Span::styled("/", Style::default().fg(Color::Yellow)),
-                Span::raw(": search"),
+                Span::raw(": search | "),
+                Span::styled("u", Style::default().fg(Color::Yellow)),
+                Span::raw(": undo | "),
+                Span::styled("^r", Style::default().fg(Color::Yellow)),
+                Span::raw(": redo"),
             ])
         };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
@@ -696,7 +700,11 @@ fn render_message(
             Span::styled("a", Style::default().fg(Color::Yellow)),
             Span::raw(": archive | "),
             Span::styled("m", Style::default().fg(Color::Yellow)),
-            Span::raw(": move"),
+            Span::raw(": move | "),
+            Span::styled("u", Style::default().fg(Color::Yellow)),
+            Span::raw(": undo | "),
+            Span::styled("^r", Style::default().fg(Color::Yellow)),
+            Span::raw(": redo"),
         ])
     };
     frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);

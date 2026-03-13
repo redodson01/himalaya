@@ -64,5 +64,10 @@ tempfile = "3"
 serial_test = "3"
 
 [patch.crates-io]
-pimalaya-tui.git = "https://github.com/pimalaya/tui"
-imap-client.git = "https://github.com/pimalaya/io-imap"
+pimalaya-tui.git = "https://github.com/redodson01/tui"
+imap-client.git = "https://github.com/redodson01/io-imap"
+email-lib.git = "https://github.com/redodson01/core"
+mml-lib.git = "https://github.com/redodson01/core"
+process-lib.git = "https://github.com/redodson01/core"
+secret-lib.git = "https://github.com/redodson01/core"
+shellexpand-utils.git = "https://github.com/redodson01/core"

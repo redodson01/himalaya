@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
@@ -174,6 +174,55 @@ pub enum Status {
     Error(String),
 }
 
+pub const UNDO_STACK_LIMIT: usize = 100;
+
+/// Represents a mutation that can be undone/redone.
+#[derive(Clone)]
+pub enum UndoAction {
+    /// Delete moved message to trash — undo moves it back.
+    Delete {
+        envelope: EnvelopeData,
+        index: usize,
+        account_key: String,
+        folder: String,
+        /// UIDPLUS destination ID(s) returned by the server after the move.
+        /// Used to reliably locate the message in the destination folder.
+        dest_id: Option<Vec<String>>,
+    },
+    /// Archive moved message to archive folder — undo moves it back.
+    Archive {
+        envelope: EnvelopeData,
+        index: usize,
+        account_key: String,
+        source_folder: String,
+        archive_folder: String,
+        dest_id: Option<Vec<String>>,
+    },
+    /// Move moved message to target folder — undo moves it back.
+    Move {
+        envelope: EnvelopeData,
+        index: usize,
+        account_key: String,
+        source_folder: String,
+        target_folder: String,
+        dest_id: Option<Vec<String>>,
+    },
+    /// Toggled the Seen flag.
+    ToggleRead {
+        envelope_id: String,
+        account_key: String,
+        folder: String,
+        was_unseen: bool,
+    },
+    /// Toggled the Flagged flag.
+    ToggleFlag {
+        envelope_id: String,
+        account_key: String,
+        folder: String,
+        was_flagged: bool,
+    },
+}
+
 pub struct App {
     pub envelopes: Vec<EnvelopeData>,
     pub sections: Vec<AccountSection>,
@@ -194,6 +243,14 @@ pub struct App {
     pub envelopes_stale: bool,
     /// In-memory cache for previously loaded data.
     pub cache: Cache,
+    pub undo_stack: VecDeque<UndoAction>,
+    pub redo_stack: VecDeque<UndoAction>,
+    /// When true, the next MutationDone should immediately trigger an undo.
+    /// Set when the user presses `u` while a mutation is still in-flight.
+    pub undo_on_complete: bool,
+    /// When true, the next MutationDone should immediately trigger a redo.
+    /// Set when the user presses `Ctrl+r` while a mutation is still in-flight.
+    pub redo_on_complete: bool,
 }
 
 impl App {
@@ -212,6 +269,10 @@ impl App {
             last_read_context: None,
             envelopes_stale: false,
             cache: Cache::default(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
+            undo_on_complete: false,
+            redo_on_complete: false,
         }
     }
 
@@ -227,6 +288,16 @@ impl App {
             FolderContext::AllInboxes => "INBOX".to_string(),
             FolderContext::SingleFolder { folder_name, .. } => folder_name.clone(),
         }
+    }
+
+    pub fn set_deferred_undo(&mut self) {
+        self.undo_on_complete = true;
+        self.redo_on_complete = false;
+    }
+
+    pub fn set_deferred_redo(&mut self) {
+        self.redo_on_complete = true;
+        self.undo_on_complete = false;
     }
 
     pub fn select_next(&mut self) {
@@ -313,7 +384,6 @@ impl App {
 
     /// Insert an envelope at the given index, updating sections accordingly.
     /// This is the inverse of `remove_envelope`.
-    #[allow(dead_code)]
     pub fn insert_envelope(&mut self, index: usize, envelope: EnvelopeData) {
         let clamped = index.min(self.envelopes.len());
         let account = envelope.account.clone();
@@ -555,7 +625,7 @@ mod tests {
 
         let env = Envelope {
             id: "42".to_string(),
-
+            message_id: String::new(),
             subject: "Test Subject".to_string(),
             from: Mailbox {
                 name: Some("Alice".to_string()),
@@ -600,6 +670,7 @@ mod tests {
             date: String::new(),
             flags: Flags(Default::default()),
             has_attachment: false,
+            message_id: String::new(),
         };
 
         let data = EnvelopeData::from(&env);
@@ -1279,6 +1350,15 @@ mod tests {
         assert_eq!(app.envelopes.len(), 4);
     }
 
+    // --- Undo/redo stack tests ---
+
+    #[test]
+    fn new_app_has_empty_undo_redo_stacks() {
+        let app = App::new(vec![], "INBOX".to_string());
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
+    }
+
     #[test]
     fn remove_and_insert_roundtrip() {
         let mut env1 = make_envelope("1", "a");
@@ -1305,6 +1385,47 @@ mod tests {
         assert_eq!(app.envelopes.len(), 3);
         assert_eq!(app.envelopes[1].id, "2");
         assert_eq!(app.sections[0].count, 3);
+    }
+
+    #[test]
+    fn set_deferred_undo_clears_redo() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.redo_on_complete = true;
+        app.set_deferred_undo();
+        assert!(app.undo_on_complete);
+        assert!(!app.redo_on_complete);
+    }
+
+    #[test]
+    fn set_deferred_redo_clears_undo() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.undo_on_complete = true;
+        app.set_deferred_redo();
+        assert!(app.redo_on_complete);
+        assert!(!app.undo_on_complete);
+    }
+
+    #[test]
+    fn undo_stack_capped_at_limit() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        for i in 0..150 {
+            app.undo_stack.push_back(UndoAction::ToggleRead {
+                envelope_id: i.to_string(),
+                account_key: "work".to_string(),
+                folder: "INBOX".to_string(),
+                was_unseen: true,
+            });
+            while app.undo_stack.len() > UNDO_STACK_LIMIT {
+                app.undo_stack.pop_front();
+            }
+        }
+        assert_eq!(app.undo_stack.len(), UNDO_STACK_LIMIT);
+        // Oldest was dropped — first remaining should be "50"
+        if let UndoAction::ToggleRead { envelope_id, .. } = &app.undo_stack[0] {
+            assert_eq!(envelope_id, "50");
+        } else {
+            panic!("Expected ToggleRead");
+        }
     }
 
     // --- FolderContext tests ---

@@ -548,6 +548,8 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `F` | Forward message |
 | `\` | Open folder list |
 | `/` | Search / filter list |
+| `u` | Undo last action |
+| `Ctrl+r` | Redo last undone action |
 
 ### Folder list
 
@@ -577,6 +579,8 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 | `R` | Reply to message |
 | `A` | Reply all |
 | `F` | Forward message |
+| `u` | Undo last action |
+| `Ctrl+r` | Redo last undone action |
 
 ### Move folder picker
 

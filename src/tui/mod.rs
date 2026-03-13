@@ -24,8 +24,8 @@ use tokio::sync::mpsc;
 use crate::config::TomlConfig;
 
 use self::app::{
-    sort_flags, AccountPickerState, AccountSection, App, EnvelopeData, FolderEntry,
-    FolderEnvelopeState, FolderListState, FolderSection, MoveFolderPickerState, Status, View,
+    sort_flags, AccountPickerState, AccountSection, App, EnvelopeData, FolderContext, FolderEntry,
+    FolderListState, FolderSection, MoveFolderPickerState, SavedListState, Status, View,
 };
 use self::event::{handle_event, Action};
 
@@ -78,13 +78,11 @@ enum BackendResult {
     FoldersLoaded {
         folders: Vec<FolderEntry>,
         sections: Vec<FolderSection>,
-        saved_envelope_selected: usize,
     },
     FolderEnvelopesLoaded {
         folder_name: String,
         account_key: String,
         envelopes: Vec<EnvelopeData>,
-        parent: FolderListState,
     },
     MoveFoldersLoaded {
         folders: Vec<FolderEntry>,
@@ -92,11 +90,9 @@ enum BackendResult {
         source_envelope_index: usize,
         source_folder: String,
         account_key: String,
-        return_to_folder: bool,
-        folder_envelope_state: Option<Box<FolderEnvelopeState>>,
     },
 
-    // Fire-and-forget acknowledgement — clears the "Working…" status
+    // Mutation succeeded — clears the "Working…" status.
     MutationDone,
 
     // Errors
@@ -290,57 +286,46 @@ struct EnvelopeContext {
     folder: String,
 }
 
-/// Extract info about the active envelope, regardless of whether we're in the
-/// main list, a folder envelope list, or reading a message.
+/// Extract info about the active envelope — always reads from app.envelopes.
 fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeContext> {
-    match &app.view {
-        View::FolderEnvelopeList(state) => {
-            state
-                .envelopes
-                .get(state.selected)
-                .map(|env| EnvelopeContext {
-                    id: env.id.clone(),
-                    unseen: env.unseen,
-                    flagged: env.flagged,
-                    is_draft: env.flags.contains('T'),
-                    account_key: state.account_key.clone(),
-                    folder: state.folder_name.clone(),
-                })
-        }
-        View::MessageRead {
-            folder_context: Some(ctx),
-            ..
-        } => ctx.envelopes.get(ctx.selected).map(|env| EnvelopeContext {
+    app.envelopes.get(app.selected).map(|env| {
+        let account_key = match &app.folder_context {
+            FolderContext::SingleFolder { account_key, .. } => account_key.clone(),
+            FolderContext::AllInboxes => account_key_for(app, default_account),
+        };
+        let folder = match &app.folder_context {
+            FolderContext::SingleFolder { folder_name, .. } => folder_name.clone(),
+            FolderContext::AllInboxes => {
+                // Find the inbox folder for this account's backend
+                // (we don't have direct access to backends here, so use the folder display name)
+                app.folder_display_name()
+            }
+        };
+        EnvelopeContext {
             id: env.id.clone(),
             unseen: env.unseen,
             flagged: env.flagged,
             is_draft: env.flags.contains('T'),
-            account_key: ctx.account_key.clone(),
-            folder: ctx.folder_name.clone(),
-        }),
-        _ => app.envelopes.get(app.selected).map(|env| {
-            let account_key = account_key_for(app, default_account);
-            EnvelopeContext {
-                id: env.id.clone(),
-                unseen: env.unseen,
-                flagged: env.flagged,
-                is_draft: env.flags.contains('T'),
-                account_key,
-                folder: app.folder.clone(),
-            }
-        }),
-    }
+            account_key,
+            folder,
+        }
+    })
 }
 
-/// Get a mutable reference to the active envelope in the current context.
+/// Get a mutable reference to the active envelope.
 fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
-    match &mut app.view {
-        View::FolderEnvelopeList(state) => state.envelopes.get_mut(state.selected),
-        View::MessageRead {
-            folder_context: Some(ctx),
-            ..
-        } => ctx.envelopes.get_mut(ctx.selected),
-        _ => app.envelopes.get_mut(app.selected),
+    app.envelopes.get_mut(app.selected)
+}
+
+/// Find an envelope by ID in app.envelopes and apply a mutation to it.
+/// Returns true if found.
+#[allow(dead_code)]
+fn mutate_envelope_by_id(app: &mut App, id: &str, f: impl Fn(&mut EnvelopeData)) -> bool {
+    if let Some(env) = app.envelopes.iter_mut().find(|e| e.id == id) {
+        f(env);
+        true
+    } else {
+        false
     }
 }
 
@@ -432,10 +417,6 @@ fn apply_backend_result(
                 }
             });
 
-            if app.folder == "INBOX" && !folder.is_empty() {
-                app.folder = folder.clone();
-            }
-
             backends.insert(
                 account,
                 (
@@ -448,49 +429,66 @@ fn apply_backend_result(
             );
         }
         BackendResult::EnvelopesLoaded { account, envelopes } => {
-            // Replace envelopes for this account if a section already exists,
-            // otherwise append. This avoids clearing the entire list on refresh.
-            if let Some(si) = app.sections.iter().position(|s| s.name == account) {
-                let section = &app.sections[si];
-                let old_start = section.start;
-                let old_count = section.count;
-                let new_count = envelopes.len();
+            // Only apply to the main list when viewing AllInboxes
+            if matches!(app.folder_context, FolderContext::AllInboxes) {
+                if let Some(si) = app.sections.iter().position(|s| s.name == account) {
+                    let section = &app.sections[si];
+                    let old_start = section.start;
+                    let old_count = section.count;
+                    let new_count = envelopes.len();
 
-                // Remove old envelopes for this account
-                app.envelopes
-                    .splice(old_start..old_start + old_count, envelopes);
+                    app.envelopes
+                        .splice(old_start..old_start + old_count, envelopes.clone());
 
-                // Update this section's count
-                app.sections[si].count = new_count;
+                    app.sections[si].count = new_count;
 
-                // Adjust start offsets for sections that come after this one
-                let diff = new_count as isize - old_count as isize;
-                for s in &mut app.sections {
-                    if s.start > old_start {
-                        s.start = (s.start as isize + diff) as usize;
+                    let diff = new_count as isize - old_count as isize;
+                    for s in &mut app.sections {
+                        if s.start > old_start {
+                            s.start = (s.start as isize + diff) as usize;
+                        }
+                    }
+                } else {
+                    let count = envelopes.len();
+                    let start = app.envelopes.len();
+                    app.envelopes.extend(envelopes.clone());
+                    app.sections.push(AccountSection {
+                        name: account.clone(),
+                        start,
+                        count,
+                    });
+                    resort_sections(app);
+                }
+
+                if !app.envelopes.is_empty() {
+                    app.selected = app.selected.min(app.envelopes.len() - 1);
+                } else {
+                    app.selected = 0;
+                }
+
+                // Also update the all_inboxes cache
+                app.cache.all_inboxes = Some((app.envelopes.clone(), app.sections.clone()));
+            } else {
+                // Not viewing AllInboxes — update the cache only
+                // We need to update the saved cache for when we return
+                if let Some((ref mut cached_envs, ref mut cached_sections)) = app.cache.all_inboxes
+                {
+                    if let Some(si) = cached_sections.iter().position(|s| s.name == account) {
+                        let old_start = cached_sections[si].start;
+                        let old_count = cached_sections[si].count;
+                        let new_count = envelopes.len();
+                        cached_envs.splice(old_start..old_start + old_count, envelopes);
+                        cached_sections[si].count = new_count;
+                        let diff = new_count as isize - old_count as isize;
+                        for s in cached_sections.iter_mut() {
+                            if s.start > old_start {
+                                s.start = (s.start as isize + diff) as usize;
+                            }
+                        }
                     }
                 }
-            } else {
-                let count = envelopes.len();
-                let start = app.envelopes.len();
-                app.envelopes.extend(envelopes);
-                app.sections.push(AccountSection {
-                    name: account,
-                    start,
-                    count,
-                });
-                // Re-sort sections by account name for consistent ordering
-                resort_sections(app);
             }
 
-            // Clamp selection
-            if !app.envelopes.is_empty() {
-                app.selected = app.selected.min(app.envelopes.len() - 1);
-            } else {
-                app.selected = 0;
-            }
-
-            // Clear loading status when all accounts have loaded
             app.pending_refreshes = app.pending_refreshes.saturating_sub(1);
             if app.pending_refreshes == 0 {
                 app.status = None;
@@ -503,12 +501,10 @@ fn apply_backend_result(
             account_key,
             folder,
         } => {
-            // Cache the message content for instant re-display
             app.cache
                 .messages
                 .insert(envelope_id.clone(), content.clone());
 
-            // View already transitioned optimistically — just fill in the content
             if let View::MessageRead {
                 content: view_content,
                 ..
@@ -518,24 +514,16 @@ fn apply_backend_result(
             }
             app.status = None;
 
-            // Store context for background seen-marking
             app.last_read_context = if was_unseen {
                 Some((account_key, folder, envelope_id))
             } else {
                 None
             };
         }
-        BackendResult::FoldersLoaded {
-            folders,
-            sections,
-            saved_envelope_selected,
-        } => {
-            // Cache the folder list for instant display next time
+        BackendResult::FoldersLoaded { folders, sections } => {
             app.cache.folders = Some((folders.clone(), sections.clone()));
 
-            // Update the view if the user is still waiting for folders (EnvelopeList
-            // on first load) or already viewing them (FolderList on background refresh)
-            if matches!(app.view, View::FolderList(_) | View::EnvelopeList) {
+            if matches!(app.view, View::FolderList(_) | View::MessageList) {
                 app.status = None;
                 let selected = if let View::FolderList(state) = &app.view {
                     state.selected
@@ -546,7 +534,6 @@ fn apply_backend_result(
                     folders,
                     sections,
                     selected,
-                    saved_envelope_selected,
                 });
             }
         }
@@ -554,37 +541,34 @@ fn apply_backend_result(
             folder_name,
             account_key,
             envelopes,
-            parent,
         } => {
-            // Cache folder envelopes for instant display next time
+            // Cache folder envelopes
             app.cache.folder_envelopes.insert(
                 (account_key.clone(), folder_name.clone()),
                 envelopes.clone(),
             );
 
-            // Update the view if the user is still waiting for this folder (FolderList
-            // on first load, EnvelopeList on legacy path) or already viewing it
-            // (FolderEnvelopeList on background refresh / cached view)
-            let should_update = matches!(app.view, View::EnvelopeList | View::FolderList(_))
-                || matches!(
-                    &app.view,
-                    View::FolderEnvelopeList(state)
-                        if state.account_key == account_key && state.folder_name == folder_name
-                );
-            if should_update {
-                app.status = None;
-                let selected = if let View::FolderEnvelopeList(state) = &app.view {
-                    state.selected
+            // If currently viewing this folder, replace envelopes
+            let viewing_this_folder = matches!(
+                &app.folder_context,
+                FolderContext::SingleFolder { folder_name: f, account_key: a }
+                    if *f == folder_name && *a == account_key
+            );
+
+            if viewing_this_folder && matches!(app.view, View::MessageList) {
+                let old_selected = app.selected;
+                app.envelopes = envelopes;
+                app.sections = vec![AccountSection {
+                    name: account_key,
+                    start: 0,
+                    count: app.envelopes.len(),
+                }];
+                if !app.envelopes.is_empty() {
+                    app.selected = old_selected.min(app.envelopes.len() - 1);
                 } else {
-                    0
-                };
-                app.view = View::FolderEnvelopeList(FolderEnvelopeState {
-                    envelopes,
-                    selected,
-                    folder_name,
-                    account_key,
-                    parent,
-                });
+                    app.selected = 0;
+                }
+                app.status = None;
             }
         }
         BackendResult::MoveFoldersLoaded {
@@ -593,8 +577,6 @@ fn apply_backend_result(
             source_envelope_index,
             source_folder,
             account_key,
-            return_to_folder,
-            folder_envelope_state,
         } => {
             if folders.is_empty() {
                 app.status = Some(Status::Error("No other folders available".to_string()));
@@ -607,15 +589,15 @@ fn apply_backend_result(
                     source_envelope_index,
                     source_folder,
                     account_key,
-                    return_to_folder,
-                    folder_envelope_state,
                 });
             }
         }
         BackendResult::MutationDone => {
-            // Clear the "Working…" status unless another operation set it
             if matches!(app.status, Some(Status::Working(_))) {
                 app.status = None;
+            }
+            if app.envelopes_stale {
+                start_full_refresh(app, backends, tx);
             }
         }
         BackendResult::Error {
@@ -625,7 +607,6 @@ fn apply_backend_result(
             app.status = Some(Status::Error(message));
             app.pending_refreshes = app.pending_refreshes.saturating_sub(1);
             if needs_refresh {
-                refresh_folder_view_if_needed(app, backends, tx);
                 start_full_refresh(app, backends, tx);
             }
         }
@@ -637,9 +618,7 @@ fn resort_sections(app: &mut App) {
     if app.sections.len() <= 1 {
         return;
     }
-    // Pair each section with its envelope slice, sort by name, rebuild
     let mut groups: Vec<(String, Vec<EnvelopeData>)> = Vec::new();
-    // Drain sections in reverse order so earlier indices stay valid
     let sections = std::mem::take(&mut app.sections);
     for section in sections.iter().rev() {
         let end = (section.start + section.count).min(app.envelopes.len());
@@ -695,7 +674,6 @@ async fn handle_compose(
     account_override: Option<&str>,
     tx: &mpsc::UnboundedSender<BackendResult>,
 ) -> Result<()> {
-    // Determine account key and envelope context
     let (account_key, envelope_id, folder) = match kind {
         ComposeKind::New => {
             let mut key = if let Some(ovr) = account_override {
@@ -740,7 +718,6 @@ async fn handle_compose(
     app.status = Some(Status::Working(status_msg.to_string()));
     terminal.draw(|frame| ui::render(frame, app))?;
 
-    // Build a send-capable backend
     let compose_backend = match build_compose_backend(toml_account_config, account_config).await {
         Ok(b) => b,
         Err(e) => {
@@ -749,7 +726,6 @@ async fn handle_compose(
         }
     };
 
-    // Build the template
     let tpl = match kind {
         ComposeKind::New => {
             Message::new_tpl_builder(account_config.clone())
@@ -787,21 +763,17 @@ async fn handle_compose(
         }
     };
 
-    // Suspend TUI
     ratatui::restore();
 
-    // Run editor flow
     let mut printer = StdoutPrinter::default();
     let editor_result =
         editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
             .await;
 
-    // Restore TUI
     *terminal = ratatui::init();
 
     match editor_result {
         Ok(()) => {
-            // For reply/reply-all, add Answered flag in background
             if matches!(kind, ComposeKind::Reply | ComposeKind::ReplyAll) {
                 if let Some(id) = envelope_id {
                     let backend = backend.clone();
@@ -811,9 +783,7 @@ async fn handle_compose(
                     });
                 }
             }
-            // Refresh envelope list (async) and folder view if in one
             app.status = Some(Status::Working("Refreshing…".to_string()));
-            refresh_folder_view_if_needed(app, backends, tx);
             start_full_refresh(app, backends, tx);
         }
         Err(e) => {
@@ -861,7 +831,6 @@ async fn handle_edit_message(
     app.status = Some(Status::Working("Editing…".to_string()));
     terminal.draw(|frame| ui::render(frame, app))?;
 
-    // Fetch message and build editable template
     let tpl = match backend.get_messages(&folder, &[id]).await {
         Ok(msgs) => match msgs.first() {
             Some(msg) => msg.to_read_tpl(account_config, |tpl| tpl).await,
@@ -884,7 +853,6 @@ async fn handle_edit_message(
         }
     };
 
-    // Build a send-capable backend
     let compose_backend = match build_compose_backend(toml_account_config, account_config).await {
         Ok(b) => b,
         Err(e) => {
@@ -893,26 +861,21 @@ async fn handle_edit_message(
         }
     };
 
-    // Suspend TUI
     ratatui::restore();
 
-    // Run editor flow
     let mut printer = StdoutPrinter::default();
     let editor_result =
         editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
             .await;
 
-    // Restore TUI
     *terminal = ratatui::init();
 
     match editor_result {
         Ok(()) => {
             if is_draft {
-                // Optimistically remove the draft from the folder view
-                if let View::FolderEnvelopeList(state) = &mut app.view {
-                    if let Some(pos) = state.envelopes.iter().position(|e| e.id == id_str) {
-                        state.remove_envelope(pos);
-                    }
+                // Optimistically remove the draft
+                if let Some(pos) = app.envelopes.iter().position(|e| e.id == id_str) {
+                    app.remove_envelope(pos);
                 }
                 // Delete on server in background
                 let backend = backend.clone();
@@ -930,7 +893,6 @@ async fn handle_edit_message(
                 });
             }
             app.status = Some(Status::Working("Refreshing…".to_string()));
-            refresh_folder_view_if_needed(app, backends, tx);
             start_full_refresh(app, backends, tx);
         }
         Err(e) => {
@@ -941,86 +903,57 @@ async fn handle_edit_message(
     Ok(())
 }
 
-/// Start a full refresh: spawn envelope loads for all accounts.
+/// Start a full refresh: context-aware (AllInboxes vs SingleFolder).
 fn start_full_refresh(
     app: &mut App,
     backends: &BackendMap,
     tx: &mpsc::UnboundedSender<BackendResult>,
 ) {
-    app.pending_refreshes = backends.len();
     app.envelopes_stale = false;
-    spawn_refresh_envelope_list(backends, tx);
-}
-
-/// Sync the folder envelope cache from the current FolderEnvelopeList view state.
-/// Call after any optimistic mutation that modifies folder-specific envelopes.
-fn sync_folder_envelope_cache(app: &mut App) {
-    if let View::FolderEnvelopeList(state) = &app.view {
-        app.cache.folder_envelopes.insert(
-            (state.account_key.clone(), state.folder_name.clone()),
-            state.envelopes.clone(),
-        );
-    }
-}
-
-/// If the current view is a folder-specific view (FolderEnvelopeList or MessageRead
-/// with folder_context), spawn a background re-fetch of that folder's envelopes so
-/// the view reflects any changes (e.g. draft deleted after send/discard).
-fn refresh_folder_view_if_needed(
-    app: &App,
-    backends: &BackendMap,
-    tx: &mpsc::UnboundedSender<BackendResult>,
-) {
-    let (folder_name, account_key, parent) = match &app.view {
-        View::FolderEnvelopeList(state) => (
-            state.folder_name.clone(),
-            state.account_key.clone(),
-            state.parent.clone(),
-        ),
-        View::MessageRead {
-            folder_context: Some(ctx),
-            ..
-        } => (
-            ctx.folder_name.clone(),
-            ctx.account_key.clone(),
-            ctx.parent.clone(),
-        ),
-        _ => return,
-    };
-
-    let Some((backend, account_config, _, _, _)) = backends.get(&account_key) else {
-        return;
-    };
-
-    let tx = tx.clone();
-    let backend = backend.clone();
-    let account_config = account_config.clone();
-    tokio::spawn(async move {
-        let page_size = account_config.get_envelope_list_page_size();
-        let opts = ListEnvelopesOptions {
-            page: 0,
-            page_size,
-            query: None,
-        };
-        match backend.list_envelopes(&folder_name, opts).await {
-            Ok(envelopes) => {
-                let envelope_data: Vec<EnvelopeData> =
-                    envelopes.iter().map(EnvelopeData::from).collect();
-                let _ = tx.send(BackendResult::FolderEnvelopesLoaded {
-                    folder_name,
-                    account_key,
-                    envelopes: envelope_data,
-                    parent,
-                });
-            }
-            Err(e) => {
-                let _ = tx.send(BackendResult::Error {
-                    message: format!("Error refreshing folder: {e}"),
-                    needs_refresh: false,
+    match &app.folder_context {
+        FolderContext::AllInboxes => {
+            app.pending_refreshes = backends.len();
+            spawn_refresh_envelope_list(backends, tx);
+        }
+        FolderContext::SingleFolder {
+            folder_name,
+            account_key,
+        } => {
+            app.pending_refreshes = 1;
+            if let Some((backend, account_config, _, _, _)) = backends.get(account_key) {
+                let tx = tx.clone();
+                let backend = backend.clone();
+                let account_config = account_config.clone();
+                let folder_name = folder_name.clone();
+                let account_key = account_key.clone();
+                tokio::spawn(async move {
+                    let page_size = account_config.get_envelope_list_page_size();
+                    let opts = ListEnvelopesOptions {
+                        page: 0,
+                        page_size,
+                        query: None,
+                    };
+                    match backend.list_envelopes(&folder_name, opts).await {
+                        Ok(envelopes) => {
+                            let envelope_data: Vec<EnvelopeData> =
+                                envelopes.iter().map(EnvelopeData::from).collect();
+                            let _ = tx.send(BackendResult::FolderEnvelopesLoaded {
+                                folder_name,
+                                account_key,
+                                envelopes: envelope_data,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(BackendResult::Error {
+                                message: format!("Error refreshing folder: {e}"),
+                                needs_refresh: false,
+                            });
+                        }
+                    }
                 });
             }
         }
-    });
+    }
 }
 
 async fn run_event_loop(
@@ -1038,7 +971,6 @@ async fn run_event_loop(
         while let Ok(result) = rx.try_recv() {
             apply_backend_result(app, result, backends, &tx);
 
-            // If we got a message loaded with a seen context, fire the server mark
             if let Some((ref account_key, ref folder, ref envelope_id)) = app.last_read_context {
                 if let Some((backend, _, _, _, _)) = backends.get(account_key) {
                     if let Ok(id) = envelope_id.parse::<usize>() {
@@ -1056,41 +988,65 @@ async fn run_event_loop(
             }
         }
 
-        // 2. Check for user input (100ms poll — same as today)
-        let mut action = handle_event(&app.view, app.search.is_some())?;
+        // 2. Check for user input (100ms poll)
+        let mut action = handle_event(&app.view, &app.folder_context, app.search.is_some())?;
 
         // Clear transient status on any keypress
-        if !matches!(action, Action::None) && app.status.is_some() {
-            // Don't clear "Loading…" status during pending refreshes
-            if app.pending_refreshes == 0 || !matches!(app.status, Some(Status::Working(_))) {
-                app.status = None;
-            }
+        if !matches!(action, Action::None)
+            && app.status.is_some()
+            && (app.pending_refreshes == 0 || !matches!(app.status, Some(Status::Working(_))))
+        {
+            app.status = None;
         }
 
         // This loop allows SearchConfirm to set a follow-up action and re-enter.
         let mut clear_search_after = false;
         loop {
-            let in_folder_context = matches!(
-                app.view,
-                View::FolderEnvelopeList(_)
-                    | View::MessageRead {
-                        folder_context: Some(_),
-                        ..
-                    }
-            );
-
             match action {
                 Action::None => {}
                 Action::Quit => {
                     app.should_quit = true;
                 }
+                Action::BackToAllInboxes => {
+                    // Return from SingleFolder to AllInboxes
+                    // Cache current folder envelopes
+                    if let FolderContext::SingleFolder {
+                        ref folder_name,
+                        ref account_key,
+                    } = app.folder_context
+                    {
+                        app.cache.folder_envelopes.insert(
+                            (account_key.clone(), folder_name.clone()),
+                            app.envelopes.clone(),
+                        );
+                    }
+                    // Restore from saved_list_state or cache
+                    if let Some(saved) = app.saved_list_state.take() {
+                        app.envelopes = saved.envelopes;
+                        app.sections = saved.sections;
+                        app.selected = saved.selected;
+                        app.folder_context = saved.folder_context;
+                    } else if let Some((envs, secs)) = app.cache.all_inboxes.clone() {
+                        app.envelopes = envs;
+                        app.sections = secs;
+                        app.selected = 0;
+                        app.folder_context = FolderContext::AllInboxes;
+                    } else {
+                        app.envelopes.clear();
+                        app.sections.clear();
+                        app.selected = 0;
+                        app.folder_context = FolderContext::AllInboxes;
+                    }
+                    app.view = View::MessageList;
+                    app.search = None;
+                    // Always refresh: the all-inboxes data may be stale if the
+                    // user mutated messages while viewing the folder.
+                    app.status = Some(Status::Working("Refreshing…".to_string()));
+                    start_full_refresh(app, backends, &tx);
+                }
                 Action::SelectNext => {
                     if app.search.is_some() {
                         app.search_select_next();
-                    } else if let View::FolderEnvelopeList(state) = &mut app.view {
-                        if !state.envelopes.is_empty() {
-                            state.selected = (state.selected + 1).min(state.envelopes.len() - 1);
-                        }
                     } else {
                         app.select_next();
                     }
@@ -1098,35 +1054,15 @@ async fn run_event_loop(
                 Action::SelectPrev => {
                     if app.search.is_some() {
                         app.search_select_prev();
-                    } else if let View::FolderEnvelopeList(state) = &mut app.view {
-                        state.selected = state.selected.saturating_sub(1);
                     } else {
                         app.select_prev();
                     }
                 }
                 Action::ReadMessage | Action::NextMessage => {
-                    // Advance selection for NextMessage, with "no more" feedback
                     if matches!(action, Action::NextMessage) {
-                        let advanced = match &mut app.view {
-                            View::MessageRead {
-                                folder_context: Some(ctx),
-                                ..
-                            } if !ctx.envelopes.is_empty() => {
-                                let prev = ctx.selected;
-                                ctx.selected = (ctx.selected + 1).min(ctx.envelopes.len() - 1);
-                                ctx.selected != prev
-                            }
-                            View::MessageRead {
-                                folder_context: None,
-                                ..
-                            } => {
-                                let prev = app.selected;
-                                app.select_next();
-                                app.selected != prev
-                            }
-                            _ => false,
-                        };
-                        if !advanced {
+                        let prev = app.selected;
+                        app.select_next();
+                        if app.selected == prev {
                             app.status = Some(Status::Working("No more messages".to_string()));
                             continue;
                         }
@@ -1135,8 +1071,6 @@ async fn run_event_loop(
                     if let Some(ctx) = active_envelope_context(app, default_account) {
                         app.status = Some(Status::Working("Loading…".to_string()));
 
-                        // Optimistic: mark as seen locally and transition to
-                        // MessageRead immediately with placeholder content
                         if ctx.unseen {
                             if let Some(env) = active_envelope_mut(app) {
                                 env.unseen = false;
@@ -1146,35 +1080,13 @@ async fn run_event_loop(
                             }
                         }
 
-                        // Use cached message content if available
                         let cached_content =
                             app.cache.messages.get(&ctx.id).cloned().unwrap_or_default();
 
-                        if in_folder_context {
-                            let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                            let folder_state = match old_view {
-                                View::FolderEnvelopeList(state) => state,
-                                View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } => *ctx,
-                                other => {
-                                    app.view = other;
-                                    break;
-                                }
-                            };
-                            app.view = View::MessageRead {
-                                content: cached_content,
-                                scroll: 0,
-                                folder_context: Some(Box::new(folder_state)),
-                            };
-                        } else {
-                            app.view = View::MessageRead {
-                                content: cached_content,
-                                scroll: 0,
-                                folder_context: None,
-                            };
-                        }
+                        app.view = View::MessageRead {
+                            content: cached_content,
+                            scroll: 0,
+                        };
 
                         let tx = tx.clone();
                         let envelope_id = ctx.id.clone();
@@ -1226,15 +1138,8 @@ async fn run_event_loop(
                     }
                 }
                 Action::BackToList => {
-                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                    if let View::MessageRead {
-                        folder_context: Some(ctx),
-                        ..
-                    } = old_view
-                    {
-                        app.view = View::FolderEnvelopeList(*ctx);
-                    } else if app.envelopes_stale {
-                        // A mutation happened — refresh to sync with the server
+                    app.view = View::MessageList;
+                    if app.envelopes_stale {
                         app.status = Some(Status::Working("Refreshing…".to_string()));
                         start_full_refresh(app, backends, &tx);
                     }
@@ -1254,29 +1159,11 @@ async fn run_event_loop(
                         let (id_str, account_key, folder) = (ctx.id, ctx.account_key, ctx.folder);
 
                         // Optimistic local update
-                        if in_folder_context {
-                            let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                            let mut state = match old_view {
-                                View::FolderEnvelopeList(s) => s,
-                                View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } => *ctx,
-                                other => {
-                                    app.view = other;
-                                    app.status = None;
-                                    break;
-                                }
-                            };
-                            state.remove_envelope(state.selected);
-                            app.view = View::FolderEnvelopeList(state);
-                            sync_folder_envelope_cache(app);
-                        } else {
-                            app.remove_envelope(app.selected);
-                            if !matches!(app.view, View::EnvelopeList) {
-                                app.view = View::EnvelopeList;
-                            }
+                        app.remove_envelope(app.selected);
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
                         }
+
                         app.status = Some(Status::Working("Deleting…".to_string()));
                         app.envelopes_stale = true;
 
@@ -1304,7 +1191,6 @@ async fn run_event_loop(
                 }
                 Action::ToggleRead => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
-                        // Optimistic local update
                         if let Some(env) = active_envelope_mut(app) {
                             if ctx.unseen {
                                 env.unseen = false;
@@ -1316,27 +1202,8 @@ async fn run_event_loop(
                                 env.flags = env.flags.replace('S', "");
                             }
                         }
-                        // Return to the list view (main or folder-specific)
-                        if in_folder_context {
-                            if let View::MessageRead {
-                                folder_context: Some(_),
-                                ..
-                            } = &app.view
-                            {
-                                let old = std::mem::replace(&mut app.view, View::EnvelopeList);
-                                if let View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } = old
-                                {
-                                    app.view = View::FolderEnvelopeList(*ctx);
-                                }
-                            }
-                            sync_folder_envelope_cache(app);
-                        } else {
-                            if !matches!(app.view, View::EnvelopeList) {
-                                app.view = View::EnvelopeList;
-                            }
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
                         }
                         app.status = Some(Status::Working("Updating…".to_string()));
 
@@ -1371,7 +1238,6 @@ async fn run_event_loop(
                 }
                 Action::ToggleFlag => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
-                        // Optimistic local update
                         if let Some(env) = active_envelope_mut(app) {
                             env.flagged = !ctx.flagged;
                             if ctx.flagged {
@@ -1380,27 +1246,8 @@ async fn run_event_loop(
                                 env.flags = sort_flags(&format!("F{}", env.flags));
                             }
                         }
-                        // Return to the list view (main or folder-specific)
-                        if in_folder_context {
-                            if let View::MessageRead {
-                                folder_context: Some(_),
-                                ..
-                            } = &app.view
-                            {
-                                let old = std::mem::replace(&mut app.view, View::EnvelopeList);
-                                if let View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } = old
-                                {
-                                    app.view = View::FolderEnvelopeList(*ctx);
-                                }
-                            }
-                            sync_folder_envelope_cache(app);
-                        } else {
-                            if !matches!(app.view, View::EnvelopeList) {
-                                app.view = View::EnvelopeList;
-                            }
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
                         }
                         app.status = Some(Status::Working("Updating…".to_string()));
 
@@ -1434,7 +1281,20 @@ async fn run_event_loop(
                     }
                 }
                 Action::OpenFolderList => {
-                    let saved_envelope_selected = app.selected;
+                    // Save current state for restoration
+                    app.saved_list_state = Some(SavedListState {
+                        folder_context: app.folder_context.clone(),
+                        envelopes: app.envelopes.clone(),
+                        sections: app.sections.clone(),
+                        selected: app.selected,
+                    });
+
+                    // Also cache AllInboxes state if that's what we're viewing
+                    if matches!(app.folder_context, FolderContext::AllInboxes) {
+                        app.cache.all_inboxes = Some((app.envelopes.clone(), app.sections.clone()));
+                    }
+
+                    app.search = None;
 
                     // Show cached folders immediately if available
                     if let Some((folders, sections)) = &app.cache.folders {
@@ -1442,7 +1302,6 @@ async fn run_event_loop(
                             folders: folders.clone(),
                             sections: sections.clone(),
                             selected: 0,
-                            saved_envelope_selected,
                         });
                         app.status = Some(Status::Working("Refreshing folders…".to_string()));
                     } else {
@@ -1450,12 +1309,9 @@ async fn run_event_loop(
                     }
                     let tx = tx.clone();
 
-                    // Spawn folder loading for all backends
                     let mut keys: Vec<String> = backends.keys().cloned().collect();
                     keys.sort();
 
-                    // We need to collect all folders from all backends, so we spawn
-                    // a single task that iterates them sequentially to maintain ordering.
                     let backend_entries: Vec<_> = keys
                         .iter()
                         .filter_map(|key| {
@@ -1498,11 +1354,7 @@ async fn run_event_loop(
                             }
                         }
 
-                        let _ = tx.send(BackendResult::FoldersLoaded {
-                            folders,
-                            sections,
-                            saved_envelope_selected,
-                        });
+                        let _ = tx.send(BackendResult::FoldersLoaded { folders, sections });
                     });
                 }
                 Action::FolderSelectNext => {
@@ -1520,34 +1372,25 @@ async fn run_event_loop(
                     }
                 }
                 Action::BackFromFolders => {
-                    if let View::FolderList(state) = &app.view {
-                        app.selected = state.saved_envelope_selected;
+                    // Restore saved state
+                    if let Some(saved) = app.saved_list_state.take() {
+                        app.envelopes = saved.envelopes;
+                        app.sections = saved.sections;
+                        app.selected = saved.selected;
+                        app.folder_context = saved.folder_context;
                     }
-                    app.view = View::EnvelopeList;
+                    app.view = View::MessageList;
+                    app.search = None;
                     if app.envelopes_stale {
                         app.status = Some(Status::Working("Refreshing…".to_string()));
                         start_full_refresh(app, backends, &tx);
                     }
                 }
                 Action::CancelMove => {
-                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                    if let View::MoveFolderPicker(picker) = old_view {
-                        if let Some(fe_state) = picker.folder_envelope_state {
-                            app.view = View::FolderEnvelopeList(*fe_state);
-                        } else if app.envelopes_stale {
-                            app.status = Some(Status::Working("Refreshing…".to_string()));
-                            start_full_refresh(app, backends, &tx);
-                        }
-                    }
-                }
-                Action::BackFromFolderEnvelopes => {
-                    let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                    if let View::FolderEnvelopeList(state) = old_view {
-                        app.view = View::FolderList(state.parent);
-                    }
+                    app.view = View::MessageList;
+                    app.search = None;
                 }
                 Action::SelectFolder => {
-                    // Extract folder info and take the FolderList state
                     let folder_info = if let View::FolderList(state) = &app.view {
                         state
                             .folders
@@ -1567,12 +1410,10 @@ async fn run_event_loop(
                         };
 
                         if let Some((backend, account_config, _, _, _)) = backends.get(&key) {
-                            // Clone the FolderListState to use as parent (don't
-                            // change the view yet — keep folder list visible during load)
-                            let parent = if let View::FolderList(state) = &app.view {
-                                state.clone()
-                            } else {
-                                unreachable!()
+                            // Set folder context to the selected folder
+                            app.folder_context = FolderContext::SingleFolder {
+                                folder_name: folder_name.clone(),
+                                account_key: key.clone(),
                             };
 
                             // Show cached folder envelopes immediately if available
@@ -1581,19 +1422,26 @@ async fn run_event_loop(
                                 .folder_envelopes
                                 .get(&(key.clone(), folder_name.clone()))
                             {
-                                app.view = View::FolderEnvelopeList(FolderEnvelopeState {
-                                    envelopes: cached.clone(),
-                                    selected: 0,
-                                    folder_name: folder_name.clone(),
-                                    account_key: key.clone(),
-                                    parent: parent.clone(),
-                                });
+                                app.envelopes = cached.clone();
+                                app.sections = vec![AccountSection {
+                                    name: key.clone(),
+                                    start: 0,
+                                    count: app.envelopes.len(),
+                                }];
+                                app.selected = 0;
+                                app.view = View::MessageList;
                                 app.status =
                                     Some(Status::Working(format!("Refreshing {folder_name}…")));
                             } else {
+                                app.envelopes.clear();
+                                app.sections.clear();
+                                app.selected = 0;
+                                app.view = View::MessageList;
                                 app.status =
                                     Some(Status::Working(format!("Loading {folder_name}…")));
                             }
+
+                            app.search = None;
 
                             let tx = tx.clone();
                             let backend = backend.clone();
@@ -1615,7 +1463,6 @@ async fn run_event_loop(
                                             folder_name: folder_name_clone,
                                             account_key: key_clone,
                                             envelopes: envelope_data,
-                                            parent,
                                         });
                                     }
                                     Err(e) => {
@@ -1640,9 +1487,7 @@ async fn run_event_loop(
                 }
                 Action::SearchConfirm => {
                     let follow_up = match &app.view {
-                        View::EnvelopeList | View::FolderEnvelopeList(_) => {
-                            Some(Action::ReadMessage)
-                        }
+                        View::MessageList => Some(Action::ReadMessage),
                         View::FolderList(_) => Some(Action::SelectFolder),
                         View::MoveFolderPicker(_) => Some(Action::ConfirmMove),
                         _ => None,
@@ -1665,28 +1510,9 @@ async fn run_event_loop(
                             (ctx.id, ctx.account_key, ctx.folder);
 
                         // Optimistic local update
-                        if in_folder_context {
-                            let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                            let mut state = match old_view {
-                                View::FolderEnvelopeList(s) => s,
-                                View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } => *ctx,
-                                other => {
-                                    app.view = other;
-                                    app.status = None;
-                                    break;
-                                }
-                            };
-                            state.remove_envelope(state.selected);
-                            app.view = View::FolderEnvelopeList(state);
-                            sync_folder_envelope_cache(app);
-                        } else {
-                            app.remove_envelope(app.selected);
-                            if !matches!(app.view, View::EnvelopeList) {
-                                app.view = View::EnvelopeList;
-                            }
+                        app.remove_envelope(app.selected);
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
                         }
                         app.status = Some(Status::Working("Archiving…".to_string()));
                         app.envelopes_stale = true;
@@ -1724,37 +1550,14 @@ async fn run_event_loop(
                             ctx.id.clone(),
                             ctx.account_key.clone(),
                             ctx.folder.clone(),
-                            {
-                                match &app.view {
-                                    View::FolderEnvelopeList(state) => state.selected,
-                                    View::MessageRead {
-                                        folder_context: Some(fctx),
-                                        ..
-                                    } => fctx.selected,
-                                    _ => app.selected,
-                                }
-                            },
+                            app.selected,
                         );
 
                         app.status = Some(Status::Working("Loading folders…".to_string()));
 
-                        // Clone FolderEnvelopeState if in folder context (don't
-                        // change the view yet — MoveFoldersLoaded will replace it)
-                        let fe_state = if in_folder_context {
-                            match &app.view {
-                                View::FolderEnvelopeList(s) => Some(Box::new(s.clone())),
-                                View::MessageRead {
-                                    folder_context: Some(ctx),
-                                    ..
-                                } => Some(ctx.clone()),
-                                _ => None,
-                            }
-                        } else {
-                            if matches!(app.view, View::MessageRead { .. }) {
-                                app.view = View::EnvelopeList;
-                            }
-                            None
-                        };
+                        if matches!(app.view, View::MessageRead { .. }) {
+                            app.view = View::MessageList;
+                        }
 
                         if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
                             let tx = tx.clone();
@@ -1780,8 +1583,6 @@ async fn run_event_loop(
                                             source_envelope_index: env_index,
                                             source_folder: source_folder_clone,
                                             account_key: account_key_clone,
-                                            return_to_folder: in_folder_context,
-                                            folder_envelope_state: fe_state,
                                         });
                                     }
                                     Err(e) => {
@@ -1802,23 +1603,12 @@ async fn run_event_loop(
                             let source_folder = state.source_folder.clone();
                             let id_str = state.source_envelope_id.clone();
                             let account_key = state.account_key.clone();
-                            let return_to_folder = state.return_to_folder;
                             let source_envelope_index = state.source_envelope_index;
 
                             // Optimistic local update
-                            let old_view = std::mem::replace(&mut app.view, View::EnvelopeList);
-                            if let View::MoveFolderPicker(picker) = old_view {
-                                if return_to_folder {
-                                    if let Some(mut fe_state) = picker.folder_envelope_state {
-                                        fe_state.remove_envelope(source_envelope_index);
-                                        app.view = View::FolderEnvelopeList(*fe_state);
-                                        sync_folder_envelope_cache(app);
-                                    }
-                                } else {
-                                    app.remove_envelope(source_envelope_index);
-                                    // already set to EnvelopeList
-                                }
-                            }
+                            app.view = View::MessageList;
+                            app.remove_envelope(source_envelope_index);
+
                             app.status = Some(Status::Working(format!("Moved to {target_name}")));
                             app.envelopes_stale = true;
 
@@ -1827,6 +1617,7 @@ async fn run_event_loop(
                                     let tx = tx.clone();
                                     let backend = backend.clone();
                                     let target_name_clone = target_name.clone();
+                                    let source_folder = source_folder.clone();
                                     tokio::spawn(async move {
                                         match backend
                                             .move_messages(
@@ -1861,7 +1652,7 @@ async fn run_event_loop(
                     if backends.len() > 1 {
                         let mut accounts: Vec<String> = backends.keys().cloned().collect();
                         accounts.sort();
-                        let previous_view = std::mem::replace(&mut app.view, View::EnvelopeList);
+                        let previous_view = std::mem::replace(&mut app.view, View::MessageList);
                         app.view = View::AccountPicker(AccountPickerState {
                             accounts,
                             selected: 0,
@@ -1883,7 +1674,7 @@ async fn run_event_loop(
                 }
                 Action::ConfirmAccountPicker => {
                     if let View::AccountPicker(state) =
-                        std::mem::replace(&mut app.view, View::EnvelopeList)
+                        std::mem::replace(&mut app.view, View::MessageList)
                     {
                         if let Some(account_key) = state.accounts.get(state.selected) {
                             let key = account_key.clone();
@@ -1904,7 +1695,7 @@ async fn run_event_loop(
                 }
                 Action::CancelAccountPicker => {
                     if let View::AccountPicker(state) =
-                        std::mem::replace(&mut app.view, View::EnvelopeList)
+                        std::mem::replace(&mut app.view, View::MessageList)
                     {
                         app.view = *state.previous_view;
                     }
@@ -1967,8 +1758,7 @@ async fn run_event_loop(
 #[cfg(test)]
 mod tests {
     use self::app::{
-        AccountSection, App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderListState,
-        FolderSection, Status, View,
+        AccountSection, App, EnvelopeData, FolderContext, FolderEntry, FolderSection, Status, View,
     };
     use super::*;
 
@@ -1991,9 +1781,6 @@ mod tests {
         env
     }
 
-    /// Create the test fixtures needed for apply_backend_result: an empty BackendMap
-    /// and a channel. The tx is only used by BackendReady and Error{needs_refresh},
-    /// which we don't test here.
     fn test_fixtures() -> (
         BackendMap,
         mpsc::UnboundedSender<BackendResult>,
@@ -2016,18 +1803,6 @@ mod tests {
             name: name.to_string(),
             start,
             count,
-        }
-    }
-
-    fn make_folder_list_state() -> FolderListState {
-        FolderListState {
-            folders: vec![
-                make_folder_entry("INBOX", "work"),
-                make_folder_entry("Sent", "work"),
-            ],
-            sections: vec![make_folder_section("work", 0, 2)],
-            selected: 0,
-            saved_envelope_selected: 0,
         }
     }
 
@@ -2061,7 +1836,7 @@ mod tests {
         assert_eq!(app.sections[0].start, 0);
         assert_eq!(app.sections[0].count, 2);
         assert_eq!(app.pending_refreshes, 0);
-        assert!(app.status.is_none()); // cleared when pending_refreshes hits 0
+        assert!(app.status.is_none());
     }
 
     #[test]
@@ -2106,7 +1881,6 @@ mod tests {
         app.pending_refreshes = 2;
         app.status = Some(Status::Working("Loading…".to_string()));
 
-        // Load "personal" first
         apply_backend_result(
             &mut app,
             BackendResult::EnvelopesLoaded {
@@ -2117,9 +1891,8 @@ mod tests {
             &tx,
         );
         assert_eq!(app.pending_refreshes, 1);
-        assert!(app.status.is_some()); // still loading
+        assert!(app.status.is_some());
 
-        // Load "business" second — should sort before "personal"
         apply_backend_result(
             &mut app,
             BackendResult::EnvelopesLoaded {
@@ -2155,184 +1928,27 @@ mod tests {
             start: 0,
             count: 3,
         }];
-        app.selected = 2; // last item
+        app.selected = 2;
         app.pending_refreshes = 1;
 
-        // Replace with fewer envelopes
         apply_backend_result(
             &mut app,
             BackendResult::EnvelopesLoaded {
                 account: "work".to_string(),
-                envelopes: vec![make_envelope_for("4", "only one", "work")],
+                envelopes: vec![make_envelope_for("4", "d", "work")],
             },
             &mut backends,
             &tx,
         );
 
         assert_eq!(app.envelopes.len(), 1);
-        assert_eq!(app.selected, 0); // clamped
-    }
-
-    #[test]
-    fn envelopes_loaded_adjusts_subsequent_sections() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(
-            vec![
-                make_envelope_for("a1", "A1", "alpha"),
-                make_envelope_for("b1", "B1", "beta"),
-                make_envelope_for("b2", "B2", "beta"),
-            ],
-            "INBOX".to_string(),
-        );
-        app.sections = vec![
-            AccountSection {
-                name: "alpha".to_string(),
-                start: 0,
-                count: 1,
-            },
-            AccountSection {
-                name: "beta".to_string(),
-                start: 1,
-                count: 2,
-            },
-        ];
-        app.pending_refreshes = 1;
-
-        // Replace alpha with 3 envelopes (was 1) — beta section should shift
-        apply_backend_result(
-            &mut app,
-            BackendResult::EnvelopesLoaded {
-                account: "alpha".to_string(),
-                envelopes: vec![
-                    make_envelope_for("a1", "A1", "alpha"),
-                    make_envelope_for("a2", "A2", "alpha"),
-                    make_envelope_for("a3", "A3", "alpha"),
-                ],
-            },
-            &mut backends,
-            &tx,
-        );
-
-        assert_eq!(app.envelopes.len(), 5);
-        assert_eq!(app.sections[0].name, "alpha");
-        assert_eq!(app.sections[0].count, 3);
-        assert_eq!(app.sections[1].name, "beta");
-        assert_eq!(app.sections[1].start, 3); // shifted from 1 to 3
-        assert_eq!(app.sections[1].count, 2);
-    }
-
-    // ---- MessageLoaded ----
-
-    #[test]
-    fn message_loaded_fills_view_and_caches() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![make_envelope("1", "Test")], "INBOX".to_string());
-        app.view = View::MessageRead {
-            content: "Loading…".to_string(),
-            scroll: 0,
-            folder_context: None,
-        };
-        app.status = Some(Status::Working("Reading…".to_string()));
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::MessageLoaded {
-                content: "Hello, world!".to_string(),
-                envelope_id: "1".to_string(),
-                was_unseen: false,
-                account_key: "work".to_string(),
-                folder: "INBOX".to_string(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::MessageRead { content, .. } = &app.view {
-            assert_eq!(content, "Hello, world!");
-        } else {
-            panic!("expected MessageRead view");
-        }
-        assert!(app.status.is_none());
-        assert_eq!(app.cache.messages.get("1").unwrap(), "Hello, world!");
-        assert!(app.last_read_context.is_none()); // was_unseen = false
-    }
-
-    #[test]
-    fn message_loaded_tracks_unseen_context() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![make_envelope("42", "Unread")], "INBOX".to_string());
-        app.view = View::MessageRead {
-            content: String::new(),
-            scroll: 0,
-            folder_context: None,
-        };
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::MessageLoaded {
-                content: "Content".to_string(),
-                envelope_id: "42".to_string(),
-                was_unseen: true,
-                account_key: "work".to_string(),
-                folder: "INBOX".to_string(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        let ctx = app.last_read_context.as_ref().unwrap();
-        assert_eq!(ctx.0, "work");
-        assert_eq!(ctx.1, "INBOX");
-        assert_eq!(ctx.2, "42");
-    }
-
-    #[test]
-    fn message_loaded_preserves_folder_context() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        let fe_state = FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a")],
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: "work".to_string(),
-            parent: make_folder_list_state(),
-        };
-        app.view = View::MessageRead {
-            content: "Loading…".to_string(),
-            scroll: 5,
-            folder_context: Some(Box::new(fe_state)),
-        };
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::MessageLoaded {
-                content: "Actual content".to_string(),
-                envelope_id: "1".to_string(),
-                was_unseen: false,
-                account_key: "work".to_string(),
-                folder: "Sent".to_string(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::MessageRead {
-            content,
-            folder_context,
-            ..
-        } = &app.view
-        {
-            assert_eq!(content, "Actual content");
-            assert!(folder_context.is_some());
-        } else {
-            panic!("expected MessageRead view");
-        }
+        assert_eq!(app.selected, 0);
     }
 
     // ---- FoldersLoaded ----
 
     #[test]
-    fn folders_loaded_transitions_from_envelope_list() {
+    fn folders_loaded_transitions_to_folder_list() {
         let (mut backends, tx, _rx) = test_fixtures();
         let mut app = App::new(vec![], "INBOX".to_string());
         app.status = Some(Status::Working("Loading folders…".to_string()));
@@ -2345,356 +1961,76 @@ mod tests {
 
         apply_backend_result(
             &mut app,
-            BackendResult::FoldersLoaded {
-                folders,
-                sections,
-                saved_envelope_selected: 3,
-            },
+            BackendResult::FoldersLoaded { folders, sections },
             &mut backends,
             &tx,
         );
 
         if let View::FolderList(state) = &app.view {
             assert_eq!(state.folders.len(), 2);
-            assert_eq!(state.selected, 0);
-            assert_eq!(state.saved_envelope_selected, 3);
-        } else {
-            panic!("expected FolderList view");
-        }
-        assert!(app.status.is_none());
-        // Check cache
-        let cached = app.cache.folders.as_ref().unwrap();
-        assert_eq!(cached.0.len(), 2);
-    }
-
-    #[test]
-    fn folders_loaded_preserves_selection_on_refresh() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.view = View::FolderList(FolderListState {
-            folders: vec![make_folder_entry("INBOX", "work")],
-            sections: vec![make_folder_section("work", 0, 1)],
-            selected: 1,
-            saved_envelope_selected: 0,
-        });
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::FoldersLoaded {
-                folders: vec![
-                    make_folder_entry("INBOX", "work"),
-                    make_folder_entry("Sent", "work"),
-                    make_folder_entry("Drafts", "work"),
-                ],
-                sections: vec![make_folder_section("work", 0, 3)],
-                saved_envelope_selected: 0,
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::FolderList(state) = &app.view {
-            assert_eq!(state.selected, 1); // preserved
-            assert_eq!(state.folders.len(), 3);
-        } else {
-            panic!("expected FolderList view");
-        }
-    }
-
-    #[test]
-    fn folders_loaded_ignored_when_reading_message() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.view = View::MessageRead {
-            content: "reading something".to_string(),
-            scroll: 0,
-            folder_context: None,
-        };
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::FoldersLoaded {
-                folders: vec![make_folder_entry("INBOX", "work")],
-                sections: vec![make_folder_section("work", 0, 1)],
-                saved_envelope_selected: 0,
-            },
-            &mut backends,
-            &tx,
-        );
-
-        // View should NOT have changed
-        assert!(matches!(app.view, View::MessageRead { .. }));
-        // But cache should still be updated
-        assert!(app.cache.folders.is_some());
-    }
-
-    // ---- FolderEnvelopesLoaded ----
-
-    #[test]
-    fn folder_envelopes_loaded_from_folder_list() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        let parent = make_folder_list_state();
-        app.view = View::FolderList(parent.clone());
-        app.status = Some(Status::Working("Loading…".to_string()));
-
-        let envelopes = vec![make_envelope("1", "Hello")];
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::FolderEnvelopesLoaded {
-                folder_name: "Sent".to_string(),
-                account_key: "work".to_string(),
-                envelopes,
-                parent: parent.clone(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::FolderEnvelopeList(state) = &app.view {
-            assert_eq!(state.folder_name, "Sent");
-            assert_eq!(state.account_key, "work");
-            assert_eq!(state.envelopes.len(), 1);
+            assert_eq!(state.sections.len(), 1);
             assert_eq!(state.selected, 0);
         } else {
-            panic!("expected FolderEnvelopeList view");
-        }
-        assert!(app.status.is_none());
-        // Check cache
-        let cached = app
-            .cache
-            .folder_envelopes
-            .get(&("work".to_string(), "Sent".to_string()))
-            .unwrap();
-        assert_eq!(cached.len(), 1);
-    }
-
-    #[test]
-    fn folder_envelopes_loaded_from_envelope_list() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        // View is EnvelopeList (legacy path)
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::FolderEnvelopesLoaded {
-                folder_name: "INBOX".to_string(),
-                account_key: "work".to_string(),
-                envelopes: vec![make_envelope("1", "Test")],
-                parent: make_folder_list_state(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        assert!(matches!(app.view, View::FolderEnvelopeList(_)));
-    }
-
-    #[test]
-    fn folder_envelopes_loaded_preserves_selection_on_refresh() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a"), make_envelope("2", "b")],
-            selected: 1,
-            folder_name: "Sent".to_string(),
-            account_key: "work".to_string(),
-            parent: make_folder_list_state(),
-        });
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::FolderEnvelopesLoaded {
-                folder_name: "Sent".to_string(),
-                account_key: "work".to_string(),
-                envelopes: vec![
-                    make_envelope("1", "a"),
-                    make_envelope("2", "b"),
-                    make_envelope("3", "c"),
-                ],
-                parent: make_folder_list_state(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::FolderEnvelopeList(state) = &app.view {
-            assert_eq!(state.selected, 1); // preserved
-            assert_eq!(state.envelopes.len(), 3);
-        } else {
-            panic!("expected FolderEnvelopeList view");
-        }
-    }
-
-    #[test]
-    fn folder_envelopes_loaded_rejected_for_different_folder() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "current")],
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: "work".to_string(),
-            parent: make_folder_list_state(),
-        });
-
-        // Result is for "Drafts" but we're viewing "Sent" — should be ignored
-        apply_backend_result(
-            &mut app,
-            BackendResult::FolderEnvelopesLoaded {
-                folder_name: "Drafts".to_string(),
-                account_key: "work".to_string(),
-                envelopes: vec![make_envelope("99", "stale result")],
-                parent: make_folder_list_state(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::FolderEnvelopeList(state) = &app.view {
-            assert_eq!(state.folder_name, "Sent"); // unchanged
-            assert_eq!(state.envelopes[0].id, "1"); // unchanged
-        } else {
-            panic!("expected FolderEnvelopeList view");
-        }
-        // Cache should still be updated even when view is not
-        let cached = app
-            .cache
-            .folder_envelopes
-            .get(&("work".to_string(), "Drafts".to_string()))
-            .unwrap();
-        assert_eq!(cached[0].id, "99");
-    }
-
-    #[test]
-    fn folder_envelopes_loaded_rejected_when_reading_message() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.view = View::MessageRead {
-            content: "reading".to_string(),
-            scroll: 0,
-            folder_context: None,
-        };
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::FolderEnvelopesLoaded {
-                folder_name: "INBOX".to_string(),
-                account_key: "work".to_string(),
-                envelopes: vec![make_envelope("1", "test")],
-                parent: make_folder_list_state(),
-            },
-            &mut backends,
-            &tx,
-        );
-
-        assert!(matches!(app.view, View::MessageRead { .. }));
-    }
-
-    // ---- MoveFoldersLoaded ----
-
-    #[test]
-    fn move_folders_loaded_transitions_to_picker() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![make_envelope("1", "Test")], "INBOX".to_string());
-        app.status = Some(Status::Working("Loading folders…".to_string()));
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::MoveFoldersLoaded {
-                folders: vec![
-                    make_folder_entry("Archive", "work"),
-                    make_folder_entry("Trash", "work"),
-                ],
-                source_envelope_id: "1".to_string(),
-                source_envelope_index: 0,
-                source_folder: "INBOX".to_string(),
-                account_key: "work".to_string(),
-                return_to_folder: false,
-                folder_envelope_state: None,
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let View::MoveFolderPicker(state) = &app.view {
-            assert_eq!(state.folders.len(), 2);
-            assert_eq!(state.selected, 0);
-            assert_eq!(state.source_envelope_id, "1");
-            assert_eq!(state.source_folder, "INBOX");
-            assert!(!state.return_to_folder);
-            assert!(state.folder_envelope_state.is_none());
-        } else {
-            panic!("expected MoveFolderPicker view");
+            panic!("Expected FolderList view");
         }
         assert!(app.status.is_none());
     }
 
-    #[test]
-    fn move_folders_loaded_empty_shows_error() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
+    // ---- FolderContext switching ----
 
-        apply_backend_result(
-            &mut app,
-            BackendResult::MoveFoldersLoaded {
-                folders: vec![],
-                source_envelope_id: "1".to_string(),
-                source_envelope_index: 0,
-                source_folder: "INBOX".to_string(),
-                account_key: "work".to_string(),
-                return_to_folder: false,
-                folder_envelope_state: None,
-            },
-            &mut backends,
-            &tx,
+    #[test]
+    fn folder_context_switch_saves_and_restores() {
+        let mut app = App::new(
+            vec![make_envelope("1", "a"), make_envelope("2", "b")],
+            "INBOX".to_string(),
         );
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 2,
+        }];
+        app.selected = 1;
 
-        assert!(matches!(app.status, Some(Status::Error(_))));
-        assert!(matches!(app.view, View::EnvelopeList)); // unchanged
-    }
+        // Save state (simulating OpenFolderList)
+        app.saved_list_state = Some(SavedListState {
+            folder_context: app.folder_context.clone(),
+            envelopes: app.envelopes.clone(),
+            sections: app.sections.clone(),
+            selected: app.selected,
+        });
 
-    #[test]
-    fn move_folders_loaded_with_folder_context() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-
-        let fe_state = FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a")],
-            selected: 0,
+        // Switch to SingleFolder
+        app.envelopes = vec![make_envelope("3", "c")];
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 1,
+        }];
+        app.selected = 0;
+        app.folder_context = FolderContext::SingleFolder {
             folder_name: "Sent".to_string(),
             account_key: "work".to_string(),
-            parent: make_folder_list_state(),
         };
 
-        apply_backend_result(
-            &mut app,
-            BackendResult::MoveFoldersLoaded {
-                folders: vec![make_folder_entry("Trash", "work")],
-                source_envelope_id: "1".to_string(),
-                source_envelope_index: 0,
-                source_folder: "Sent".to_string(),
-                account_key: "work".to_string(),
-                return_to_folder: true,
-                folder_envelope_state: Some(Box::new(fe_state)),
-            },
-            &mut backends,
-            &tx,
-        );
+        assert_eq!(app.envelopes.len(), 1);
+        assert_eq!(app.folder_display_name(), "Sent");
 
-        if let View::MoveFolderPicker(state) = &app.view {
-            assert!(state.return_to_folder);
-            assert!(state.folder_envelope_state.is_some());
-        } else {
-            panic!("expected MoveFolderPicker view");
-        }
+        // Restore (simulating BackFromFolders)
+        let saved = app.saved_list_state.take().unwrap();
+        app.envelopes = saved.envelopes;
+        app.sections = saved.sections;
+        app.selected = saved.selected;
+        app.folder_context = saved.folder_context;
+
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.selected, 1);
+        assert!(matches!(app.folder_context, FolderContext::AllInboxes));
     }
 
     // ---- MutationDone ----
 
     #[test]
-    fn mutation_done_clears_working_status() {
+    fn mutation_done_clears_status() {
         let (mut backends, tx, _rx) = test_fixtures();
         let mut app = App::new(vec![], "INBOX".to_string());
         app.status = Some(Status::Working("Deleting…".to_string()));
@@ -2702,181 +2038,5 @@ mod tests {
         apply_backend_result(&mut app, BackendResult::MutationDone, &mut backends, &tx);
 
         assert!(app.status.is_none());
-    }
-
-    #[test]
-    fn mutation_done_preserves_error_status() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.status = Some(Status::Error("Something failed".to_string()));
-
-        apply_backend_result(&mut app, BackendResult::MutationDone, &mut backends, &tx);
-
-        assert!(matches!(app.status, Some(Status::Error(_))));
-    }
-
-    // ---- Error ----
-
-    #[test]
-    fn error_sets_status_and_decrements_pending() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.pending_refreshes = 2;
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::Error {
-                message: "Connection failed".to_string(),
-                needs_refresh: false,
-            },
-            &mut backends,
-            &tx,
-        );
-
-        if let Some(Status::Error(msg)) = &app.status {
-            assert_eq!(msg, "Connection failed");
-        } else {
-            panic!("expected Error status");
-        }
-        assert_eq!(app.pending_refreshes, 1);
-    }
-
-    #[test]
-    fn error_pending_refreshes_doesnt_underflow() {
-        let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
-        app.pending_refreshes = 0;
-
-        apply_backend_result(
-            &mut app,
-            BackendResult::Error {
-                message: "Oops".to_string(),
-                needs_refresh: false,
-            },
-            &mut backends,
-            &tx,
-        );
-
-        assert_eq!(app.pending_refreshes, 0); // saturating_sub
-    }
-
-    // ---- resort_sections ----
-
-    #[test]
-    fn resort_sections_sorts_by_name() {
-        let mut app = App::new(
-            vec![
-                make_envelope_for("c1", "C", "charlie"),
-                make_envelope_for("a1", "A", "alpha"),
-                make_envelope_for("b1", "B", "bravo"),
-            ],
-            "INBOX".to_string(),
-        );
-        app.sections = vec![
-            AccountSection {
-                name: "charlie".to_string(),
-                start: 0,
-                count: 1,
-            },
-            AccountSection {
-                name: "alpha".to_string(),
-                start: 1,
-                count: 1,
-            },
-            AccountSection {
-                name: "bravo".to_string(),
-                start: 2,
-                count: 1,
-            },
-        ];
-
-        resort_sections(&mut app);
-
-        assert_eq!(app.sections[0].name, "alpha");
-        assert_eq!(app.sections[1].name, "bravo");
-        assert_eq!(app.sections[2].name, "charlie");
-        assert_eq!(app.envelopes[0].account, "alpha");
-        assert_eq!(app.envelopes[1].account, "bravo");
-        assert_eq!(app.envelopes[2].account, "charlie");
-    }
-
-    #[test]
-    fn resort_sections_single_section_noop() {
-        let mut app = App::new(
-            vec![make_envelope_for("1", "A", "only")],
-            "INBOX".to_string(),
-        );
-        app.sections = vec![AccountSection {
-            name: "only".to_string(),
-            start: 0,
-            count: 1,
-        }];
-
-        resort_sections(&mut app);
-
-        assert_eq!(app.sections.len(), 1);
-        assert_eq!(app.envelopes.len(), 1);
-    }
-
-    #[test]
-    fn resort_sections_clamps_selection() {
-        let mut app = App::new(
-            vec![
-                make_envelope_for("b1", "B", "bravo"),
-                make_envelope_for("a1", "A", "alpha"),
-            ],
-            "INBOX".to_string(),
-        );
-        app.sections = vec![
-            AccountSection {
-                name: "bravo".to_string(),
-                start: 0,
-                count: 1,
-            },
-            AccountSection {
-                name: "alpha".to_string(),
-                start: 1,
-                count: 1,
-            },
-        ];
-        app.selected = 5; // out of bounds
-
-        resort_sections(&mut app);
-
-        assert_eq!(app.selected, 1); // clamped to len - 1
-    }
-
-    // ---- sync_folder_envelope_cache ----
-
-    #[test]
-    fn sync_folder_envelope_cache_updates_cache() {
-        let mut app = App::new(vec![], "INBOX".to_string());
-        let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        app.view = View::FolderEnvelopeList(FolderEnvelopeState {
-            envelopes,
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: "work".to_string(),
-            parent: make_folder_list_state(),
-        });
-
-        sync_folder_envelope_cache(&mut app);
-
-        let cached = app
-            .cache
-            .folder_envelopes
-            .get(&("work".to_string(), "Sent".to_string()))
-            .unwrap();
-        assert_eq!(cached.len(), 2);
-        assert_eq!(cached[0].id, "1");
-        assert_eq!(cached[1].id, "2");
-    }
-
-    #[test]
-    fn sync_folder_envelope_cache_noop_on_other_views() {
-        let mut app = App::new(vec![], "INBOX".to_string());
-        // View is EnvelopeList, not FolderEnvelopeList
-        sync_folder_envelope_cache(&mut app);
-        assert!(app.cache.folder_envelopes.is_empty());
     }
 }

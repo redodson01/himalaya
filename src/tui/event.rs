@@ -1,11 +1,12 @@
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
-use crate::tui::app::View;
+use crate::tui::app::{FolderContext, View};
 
 #[derive(Debug, PartialEq)]
 pub enum Action {
     None,
     Quit,
+    BackToAllInboxes,
     ReadMessage,
     BackToList,
     ScrollDown,
@@ -22,7 +23,6 @@ pub enum Action {
     FolderSelectNext,
     FolderSelectPrev,
     BackFromFolders,
-    BackFromFolderEnvelopes,
     StartSearch,
     SearchChar(char),
     SearchBackspace,
@@ -40,7 +40,11 @@ pub enum Action {
     CancelAccountPicker,
 }
 
-pub fn handle_event(view: &View, searching: bool) -> color_eyre::Result<Action> {
+pub fn handle_event(
+    view: &View,
+    folder_context: &FolderContext,
+    searching: bool,
+) -> color_eyre::Result<Action> {
     if !event::poll(std::time::Duration::from_millis(100))? {
         return Ok(Action::None);
     }
@@ -53,12 +57,17 @@ pub fn handle_event(view: &View, searching: bool) -> color_eyre::Result<Action> 
         return Ok(Action::None);
     }
 
-    Ok(action_for_key(view, key.code, searching))
+    Ok(action_for_key(view, folder_context, key.code, searching))
 }
 
 /// Pure mapping from (view, key) to action. Separated from handle_event
 /// so it can be unit-tested without terminal I/O.
-fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
+fn action_for_key(
+    view: &View,
+    folder_context: &FolderContext,
+    key: KeyCode,
+    searching: bool,
+) -> Action {
     if searching {
         return match key {
             KeyCode::Esc => Action::SearchCancel,
@@ -72,8 +81,11 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
     }
 
     match view {
-        View::EnvelopeList => match key {
-            KeyCode::Esc | KeyCode::Char('q') => Action::Quit,
+        View::MessageList => match key {
+            KeyCode::Esc | KeyCode::Char('q') => match folder_context {
+                FolderContext::AllInboxes => Action::Quit,
+                FolderContext::SingleFolder { .. } => Action::BackToAllInboxes,
+            },
             KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
             KeyCode::Enter => Action::ReadMessage,
@@ -96,24 +108,6 @@ fn action_for_key(view: &View, key: KeyCode, searching: bool) -> Action {
             KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
             KeyCode::Enter => Action::SelectFolder,
-            KeyCode::Char('/') => Action::StartSearch,
-            _ => Action::None,
-        },
-        View::FolderEnvelopeList(_) => match key {
-            KeyCode::Esc | KeyCode::Char('q') => Action::BackFromFolderEnvelopes,
-            KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
-            KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
-            KeyCode::Enter => Action::ReadMessage,
-            KeyCode::Char('d') => Action::DeleteMessage,
-            KeyCode::Char('a') => Action::ArchiveMessage,
-            KeyCode::Char('r') => Action::ToggleRead,
-            KeyCode::Char('f') => Action::ToggleFlag,
-            KeyCode::Char('m') => Action::MoveMessage,
-            KeyCode::Char('E') => Action::EditMessage,
-            KeyCode::Char('N') => Action::ComposeMessage,
-            KeyCode::Char('R') => Action::ReplyMessage,
-            KeyCode::Char('A') => Action::ReplyAllMessage,
-            KeyCode::Char('F') => Action::ForwardMessage,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
@@ -158,23 +152,33 @@ mod tests {
     use super::*;
 
     fn list_view() -> View {
-        View::EnvelopeList
+        View::MessageList
     }
 
     fn message_view() -> View {
         View::MessageRead {
             content: String::new(),
             scroll: 0,
-            folder_context: None,
         }
     }
 
-    // --- Envelope list view ---
+    fn all_inboxes() -> FolderContext {
+        FolderContext::AllInboxes
+    }
+
+    fn single_folder() -> FolderContext {
+        FolderContext::SingleFolder {
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+        }
+    }
+
+    // --- MessageList view (AllInboxes) ---
 
     #[test]
     fn list_q_quits() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('q'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('q'), false),
             Action::Quit
         );
     }
@@ -182,15 +186,33 @@ mod tests {
     #[test]
     fn list_esc_quits() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Esc, false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Esc, false),
             Action::Quit
+        );
+    }
+
+    // --- MessageList view (SingleFolder) ---
+
+    #[test]
+    fn single_folder_q_goes_back() {
+        assert_eq!(
+            action_for_key(&list_view(), &single_folder(), KeyCode::Char('q'), false),
+            Action::BackToAllInboxes
+        );
+    }
+
+    #[test]
+    fn single_folder_esc_goes_back() {
+        assert_eq!(
+            action_for_key(&list_view(), &single_folder(), KeyCode::Esc, false),
+            Action::BackToAllInboxes
         );
     }
 
     #[test]
     fn list_j_selects_next() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('j'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('j'), false),
             Action::SelectNext
         );
     }
@@ -198,7 +220,7 @@ mod tests {
     #[test]
     fn list_k_selects_prev() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('k'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('k'), false),
             Action::SelectPrev
         );
     }
@@ -206,7 +228,7 @@ mod tests {
     #[test]
     fn list_enter_reads_message() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Enter, false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Enter, false),
             Action::ReadMessage
         );
     }
@@ -214,7 +236,7 @@ mod tests {
     #[test]
     fn list_d_deletes() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('d'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('d'), false),
             Action::DeleteMessage
         );
     }
@@ -222,7 +244,7 @@ mod tests {
     #[test]
     fn list_a_archives() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('a'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('a'), false),
             Action::ArchiveMessage
         );
     }
@@ -230,7 +252,7 @@ mod tests {
     #[test]
     fn list_r_toggles_read() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('r'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('r'), false),
             Action::ToggleRead
         );
     }
@@ -238,7 +260,7 @@ mod tests {
     #[test]
     fn list_f_toggles_flag() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('f'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('f'), false),
             Action::ToggleFlag
         );
     }
@@ -246,7 +268,7 @@ mod tests {
     #[test]
     fn list_unknown_key_is_none() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('z'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('z'), false),
             Action::None
         );
     }
@@ -256,7 +278,15 @@ mod tests {
     #[test]
     fn list_backslash_opens_folders() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('\\'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('\\'), false),
+            Action::OpenFolderList
+        );
+    }
+
+    #[test]
+    fn single_folder_backslash_opens_folders() {
+        assert_eq!(
+            action_for_key(&list_view(), &single_folder(), KeyCode::Char('\\'), false),
             Action::OpenFolderList
         );
     }
@@ -269,14 +299,13 @@ mod tests {
             folders: Vec::new(),
             sections: Vec::new(),
             selected: 0,
-            saved_envelope_selected: 0,
         })
     }
 
     #[test]
     fn folder_j_selects_next() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('j'), false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('j'), false),
             Action::FolderSelectNext
         );
     }
@@ -284,7 +313,7 @@ mod tests {
     #[test]
     fn folder_k_selects_prev() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('k'), false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('k'), false),
             Action::FolderSelectPrev
         );
     }
@@ -292,7 +321,7 @@ mod tests {
     #[test]
     fn folder_enter_selects() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Enter, false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Enter, false),
             Action::SelectFolder
         );
     }
@@ -300,7 +329,7 @@ mod tests {
     #[test]
     fn folder_esc_goes_back() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Esc, false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Esc, false),
             Action::BackFromFolders
         );
     }
@@ -308,7 +337,7 @@ mod tests {
     #[test]
     fn folder_q_goes_back() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('q'), false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('q'), false),
             Action::BackFromFolders
         );
     }
@@ -316,7 +345,7 @@ mod tests {
     #[test]
     fn folder_b_is_none() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('b'), false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('b'), false),
             Action::None
         );
     }
@@ -324,73 +353,7 @@ mod tests {
     #[test]
     fn folder_unknown_is_none() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('z'), false),
-            Action::None
-        );
-    }
-
-    // --- Folder envelope list view ---
-
-    fn folder_envelope_view() -> View {
-        use crate::tui::app::{FolderEnvelopeState, FolderListState};
-        View::FolderEnvelopeList(FolderEnvelopeState {
-            envelopes: Vec::new(),
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        })
-    }
-
-    #[test]
-    fn folder_envelope_esc_goes_back() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Esc, false),
-            Action::BackFromFolderEnvelopes
-        );
-    }
-
-    #[test]
-    fn folder_envelope_q_goes_back() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('q'), false),
-            Action::BackFromFolderEnvelopes
-        );
-    }
-
-    #[test]
-    fn folder_envelope_j_selects_next() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('j'), false),
-            Action::SelectNext
-        );
-    }
-
-    #[test]
-    fn folder_envelope_enter_reads() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Enter, false),
-            Action::ReadMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_d_deletes() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('d'), false),
-            Action::DeleteMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_b_is_none() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('b'), false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('z'), false),
             Action::None
         );
     }
@@ -400,7 +363,7 @@ mod tests {
     #[test]
     fn message_esc_goes_back() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Esc, false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Esc, false),
             Action::BackToList
         );
     }
@@ -408,7 +371,7 @@ mod tests {
     #[test]
     fn message_q_goes_back() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('q'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('q'), false),
             Action::BackToList
         );
     }
@@ -416,7 +379,7 @@ mod tests {
     #[test]
     fn message_j_scrolls_down() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('j'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('j'), false),
             Action::ScrollDown
         );
     }
@@ -424,7 +387,7 @@ mod tests {
     #[test]
     fn message_k_scrolls_up() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('k'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('k'), false),
             Action::ScrollUp
         );
     }
@@ -432,7 +395,7 @@ mod tests {
     #[test]
     fn message_d_deletes() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('d'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('d'), false),
             Action::DeleteMessage
         );
     }
@@ -440,7 +403,7 @@ mod tests {
     #[test]
     fn message_a_archives() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('a'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('a'), false),
             Action::ArchiveMessage
         );
     }
@@ -448,7 +411,7 @@ mod tests {
     #[test]
     fn message_r_toggles_read() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('r'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('r'), false),
             Action::ToggleRead
         );
     }
@@ -456,7 +419,7 @@ mod tests {
     #[test]
     fn message_n_next_message() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('n'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('n'), false),
             Action::NextMessage
         );
     }
@@ -464,7 +427,7 @@ mod tests {
     #[test]
     fn message_f_toggles_flag() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('f'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('f'), false),
             Action::ToggleFlag
         );
     }
@@ -472,7 +435,7 @@ mod tests {
     #[test]
     fn message_b_is_none() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('b'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('b'), false),
             Action::None
         );
     }
@@ -480,7 +443,7 @@ mod tests {
     #[test]
     fn message_unknown_key_is_none() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('z'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('z'), false),
             Action::None
         );
     }
@@ -488,9 +451,9 @@ mod tests {
     // --- Search key bindings ---
 
     #[test]
-    fn slash_starts_search_in_envelope_list() {
+    fn slash_starts_search_in_message_list() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('/'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('/'), false),
             Action::StartSearch
         );
     }
@@ -498,15 +461,7 @@ mod tests {
     #[test]
     fn slash_starts_search_in_folder_list() {
         assert_eq!(
-            action_for_key(&folder_view(), KeyCode::Char('/'), false),
-            Action::StartSearch
-        );
-    }
-
-    #[test]
-    fn slash_starts_search_in_folder_envelope_list() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('/'), false),
+            action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('/'), false),
             Action::StartSearch
         );
     }
@@ -514,7 +469,7 @@ mod tests {
     #[test]
     fn slash_is_none_in_message_read() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('/'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('/'), false),
             Action::None
         );
     }
@@ -522,7 +477,7 @@ mod tests {
     #[test]
     fn search_mode_esc_cancels() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Esc, true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Esc, true),
             Action::SearchCancel
         );
     }
@@ -530,7 +485,7 @@ mod tests {
     #[test]
     fn search_mode_enter_confirms() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Enter, true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Enter, true),
             Action::SearchConfirm
         );
     }
@@ -538,7 +493,7 @@ mod tests {
     #[test]
     fn search_mode_char_becomes_search_char() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('x'), true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('x'), true),
             Action::SearchChar('x')
         );
     }
@@ -546,7 +501,7 @@ mod tests {
     #[test]
     fn search_mode_backspace() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Backspace, true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Backspace, true),
             Action::SearchBackspace
         );
     }
@@ -554,7 +509,7 @@ mod tests {
     #[test]
     fn search_mode_j_is_search_char() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('j'), true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('j'), true),
             Action::SearchChar('j')
         );
     }
@@ -562,7 +517,7 @@ mod tests {
     #[test]
     fn search_mode_k_is_search_char() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('k'), true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('k'), true),
             Action::SearchChar('k')
         );
     }
@@ -570,7 +525,7 @@ mod tests {
     #[test]
     fn search_mode_down_selects_next() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Down, true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Down, true),
             Action::SelectNext
         );
     }
@@ -578,7 +533,7 @@ mod tests {
     #[test]
     fn search_mode_up_selects_prev() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Up, true),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Up, true),
             Action::SelectPrev
         );
     }
@@ -588,15 +543,7 @@ mod tests {
     #[test]
     fn list_m_moves_message() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('m'), false),
-            Action::MoveMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_m_moves_message() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('m'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('m'), false),
             Action::MoveMessage
         );
     }
@@ -604,7 +551,7 @@ mod tests {
     #[test]
     fn message_m_moves_message() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('m'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('m'), false),
             Action::MoveMessage
         );
     }
@@ -620,15 +567,13 @@ mod tests {
             source_envelope_index: 0,
             source_folder: String::new(),
             account_key: String::new(),
-            return_to_folder: false,
-            folder_envelope_state: None,
         })
     }
 
     #[test]
     fn move_picker_esc_cancels() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Esc, false),
+            action_for_key(&move_picker_view(), &all_inboxes(), KeyCode::Esc, false),
             Action::CancelMove
         );
     }
@@ -636,7 +581,12 @@ mod tests {
     #[test]
     fn move_picker_q_cancels() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Char('q'), false),
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('q'),
+                false
+            ),
             Action::CancelMove
         );
     }
@@ -644,7 +594,12 @@ mod tests {
     #[test]
     fn move_picker_j_selects_next() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Char('j'), false),
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('j'),
+                false
+            ),
             Action::FolderSelectNext
         );
     }
@@ -652,7 +607,12 @@ mod tests {
     #[test]
     fn move_picker_k_selects_prev() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Char('k'), false),
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('k'),
+                false
+            ),
             Action::FolderSelectPrev
         );
     }
@@ -660,7 +620,7 @@ mod tests {
     #[test]
     fn move_picker_enter_confirms_move() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Enter, false),
+            action_for_key(&move_picker_view(), &all_inboxes(), KeyCode::Enter, false),
             Action::ConfirmMove
         );
     }
@@ -668,7 +628,12 @@ mod tests {
     #[test]
     fn move_picker_slash_starts_search() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Char('/'), false),
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('/'),
+                false
+            ),
             Action::StartSearch
         );
     }
@@ -676,7 +641,12 @@ mod tests {
     #[test]
     fn move_picker_unknown_is_none() {
         assert_eq!(
-            action_for_key(&move_picker_view(), KeyCode::Char('z'), false),
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('z'),
+                false
+            ),
             Action::None
         );
     }
@@ -686,7 +656,7 @@ mod tests {
     #[test]
     fn list_n_composes() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('N'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('N'), false),
             Action::ComposeMessage
         );
     }
@@ -694,7 +664,7 @@ mod tests {
     #[test]
     fn list_r_replies() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('R'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('R'), false),
             Action::ReplyMessage
         );
     }
@@ -702,7 +672,7 @@ mod tests {
     #[test]
     fn list_a_reply_all() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('A'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('A'), false),
             Action::ReplyAllMessage
         );
     }
@@ -710,39 +680,7 @@ mod tests {
     #[test]
     fn list_f_forwards() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('F'), false),
-            Action::ForwardMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_n_composes() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('N'), false),
-            Action::ComposeMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_r_replies() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('R'), false),
-            Action::ReplyMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_a_reply_all() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('A'), false),
-            Action::ReplyAllMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_f_forwards() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('F'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('F'), false),
             Action::ForwardMessage
         );
     }
@@ -750,7 +688,7 @@ mod tests {
     #[test]
     fn message_n_composes() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('N'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('N'), false),
             Action::ComposeMessage
         );
     }
@@ -758,7 +696,7 @@ mod tests {
     #[test]
     fn message_r_replies() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('R'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('R'), false),
             Action::ReplyMessage
         );
     }
@@ -766,7 +704,7 @@ mod tests {
     #[test]
     fn message_a_reply_all() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('A'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('A'), false),
             Action::ReplyAllMessage
         );
     }
@@ -774,7 +712,7 @@ mod tests {
     #[test]
     fn message_f_forwards() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('F'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('F'), false),
             Action::ForwardMessage
         );
     }
@@ -784,15 +722,7 @@ mod tests {
     #[test]
     fn list_e_edits() {
         assert_eq!(
-            action_for_key(&list_view(), KeyCode::Char('E'), false),
-            Action::EditMessage
-        );
-    }
-
-    #[test]
-    fn folder_envelope_e_edits() {
-        assert_eq!(
-            action_for_key(&folder_envelope_view(), KeyCode::Char('E'), false),
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('E'), false),
             Action::EditMessage
         );
     }
@@ -800,7 +730,7 @@ mod tests {
     #[test]
     fn message_e_edits() {
         assert_eq!(
-            action_for_key(&message_view(), KeyCode::Char('E'), false),
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('E'), false),
             Action::EditMessage
         );
     }
@@ -812,14 +742,14 @@ mod tests {
         View::AccountPicker(AccountPickerState {
             accounts: vec!["work".to_string(), "personal".to_string()],
             selected: 0,
-            previous_view: Box::new(View::EnvelopeList),
+            previous_view: Box::new(View::MessageList),
         })
     }
 
     #[test]
     fn account_picker_esc_cancels() {
         assert_eq!(
-            action_for_key(&account_picker_view(), KeyCode::Esc, false),
+            action_for_key(&account_picker_view(), &all_inboxes(), KeyCode::Esc, false),
             Action::CancelAccountPicker
         );
     }
@@ -827,7 +757,12 @@ mod tests {
     #[test]
     fn account_picker_q_cancels() {
         assert_eq!(
-            action_for_key(&account_picker_view(), KeyCode::Char('q'), false),
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('q'),
+                false
+            ),
             Action::CancelAccountPicker
         );
     }
@@ -835,7 +770,12 @@ mod tests {
     #[test]
     fn account_picker_j_selects_next() {
         assert_eq!(
-            action_for_key(&account_picker_view(), KeyCode::Char('j'), false),
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('j'),
+                false
+            ),
             Action::FolderSelectNext
         );
     }
@@ -843,7 +783,12 @@ mod tests {
     #[test]
     fn account_picker_k_selects_prev() {
         assert_eq!(
-            action_for_key(&account_picker_view(), KeyCode::Char('k'), false),
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('k'),
+                false
+            ),
             Action::FolderSelectPrev
         );
     }
@@ -851,7 +796,12 @@ mod tests {
     #[test]
     fn account_picker_enter_confirms() {
         assert_eq!(
-            action_for_key(&account_picker_view(), KeyCode::Enter, false),
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Enter,
+                false
+            ),
             Action::ConfirmAccountPicker
         );
     }
@@ -859,7 +809,12 @@ mod tests {
     #[test]
     fn account_picker_unknown_is_none() {
         assert_eq!(
-            action_for_key(&account_picker_view(), KeyCode::Char('z'), false),
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('z'),
+                false
+            ),
             Action::None
         );
     }

@@ -44,6 +44,27 @@ pub struct AccountSection {
     pub count: usize,
 }
 
+/// Which folder is currently being viewed.
+#[derive(Clone)]
+pub enum FolderContext {
+    /// Multi-account "all inboxes" virtual folder.
+    AllInboxes,
+    /// Single folder for a specific account.
+    SingleFolder {
+        folder_name: String,
+        account_key: String,
+    },
+}
+
+/// Saved state when navigating away from a message list (e.g. to folder list).
+#[derive(Clone)]
+pub struct SavedListState {
+    pub folder_context: FolderContext,
+    pub envelopes: Vec<EnvelopeData>,
+    pub sections: Vec<AccountSection>,
+    pub selected: usize,
+}
+
 /// In-memory cache for previously loaded data, used to show stale content
 /// instantly while fresh data loads in the background.
 #[derive(Default)]
@@ -54,6 +75,8 @@ pub struct Cache {
     pub folders: Option<(Vec<FolderEntry>, Vec<FolderSection>)>,
     /// Folder-specific envelope lists keyed by (account, folder_name).
     pub folder_envelopes: HashMap<(String, String), Vec<EnvelopeData>>,
+    /// Cached all-inboxes state for restoring after folder navigation.
+    pub all_inboxes: Option<(Vec<EnvelopeData>, Vec<AccountSection>)>,
 }
 
 impl From<&Envelope> for EnvelopeData {
@@ -121,31 +144,6 @@ pub struct FolderListState {
     pub folders: Vec<FolderEntry>,
     pub sections: Vec<FolderSection>,
     pub selected: usize,
-    pub saved_envelope_selected: usize,
-}
-
-#[derive(Clone)]
-pub struct FolderEnvelopeState {
-    pub envelopes: Vec<EnvelopeData>,
-    pub selected: usize,
-    pub folder_name: String,
-    pub account_key: String,
-    pub parent: FolderListState,
-}
-
-impl FolderEnvelopeState {
-    pub fn remove_envelope(&mut self, index: usize) -> Option<EnvelopeData> {
-        if index >= self.envelopes.len() {
-            return None;
-        }
-        let removed = self.envelopes.remove(index);
-        if !self.envelopes.is_empty() {
-            self.selected = self.selected.min(self.envelopes.len() - 1);
-        } else {
-            self.selected = 0;
-        }
-        Some(removed)
-    }
 }
 
 pub struct MoveFolderPickerState {
@@ -155,8 +153,6 @@ pub struct MoveFolderPickerState {
     pub source_envelope_index: usize,
     pub source_folder: String,
     pub account_key: String,
-    pub return_to_folder: bool,
-    pub folder_envelope_state: Option<Box<FolderEnvelopeState>>,
 }
 
 pub struct AccountPickerState {
@@ -166,14 +162,9 @@ pub struct AccountPickerState {
 }
 
 pub enum View {
-    EnvelopeList,
-    MessageRead {
-        content: String,
-        scroll: u16,
-        folder_context: Option<Box<FolderEnvelopeState>>,
-    },
+    MessageList,
+    MessageRead { content: String, scroll: u16 },
     FolderList(FolderListState),
-    FolderEnvelopeList(FolderEnvelopeState),
     MoveFolderPicker(MoveFolderPickerState),
     AccountPicker(AccountPickerState),
 }
@@ -188,7 +179,8 @@ pub struct App {
     pub sections: Vec<AccountSection>,
     pub selected: usize,
     pub view: View,
-    pub folder: String,
+    pub folder_context: FolderContext,
+    pub saved_list_state: Option<SavedListState>,
     pub should_quit: bool,
     pub status: Option<Status>,
     pub search: Option<SearchState>,
@@ -205,13 +197,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(envelopes: Vec<EnvelopeData>, folder: String) -> Self {
+    pub fn new(envelopes: Vec<EnvelopeData>, _folder: String) -> Self {
         Self {
             envelopes,
             sections: Vec::new(),
             selected: 0,
-            view: View::EnvelopeList,
-            folder,
+            view: View::MessageList,
+            folder_context: FolderContext::AllInboxes,
+            saved_list_state: None,
             should_quit: false,
             status: None,
             search: None,
@@ -226,6 +219,14 @@ impl App {
     pub fn with_sections(mut self, sections: Vec<AccountSection>) -> Self {
         self.sections = sections;
         self
+    }
+
+    /// Returns the current folder name for display purposes.
+    pub fn folder_display_name(&self) -> String {
+        match &self.folder_context {
+            FolderContext::AllInboxes => "INBOX".to_string(),
+            FolderContext::SingleFolder { folder_name, .. } => folder_name.clone(),
+        }
     }
 
     pub fn select_next(&mut self) {
@@ -310,11 +311,53 @@ impl App {
         Some(removed)
     }
 
+    /// Insert an envelope at the given index, updating sections accordingly.
+    /// This is the inverse of `remove_envelope`.
+    #[allow(dead_code)]
+    pub fn insert_envelope(&mut self, index: usize, envelope: EnvelopeData) {
+        let clamped = index.min(self.envelopes.len());
+        let account = envelope.account.clone();
+        self.envelopes.insert(clamped, envelope);
+
+        // Update sections: find the section for this account
+        let section_idx = self.sections.iter().position(|s| s.name == account);
+
+        if let Some(si) = section_idx {
+            // Shift starts for sections that come after the insertion point
+            for i in 0..self.sections.len() {
+                if i == si {
+                    self.sections[i].count += 1;
+                    // If inserting before the section's current start, the
+                    // section now begins one position earlier.
+                    if clamped < self.sections[i].start {
+                        self.sections[i].start = clamped;
+                    }
+                } else if self.sections[i].start >= clamped {
+                    self.sections[i].start += 1;
+                }
+            }
+        } else {
+            // No existing section — create one
+            // Shift sections at or after the insertion point first
+            for s in self.sections.iter_mut() {
+                if s.start >= clamped {
+                    s.start += 1;
+                }
+            }
+            self.sections.push(AccountSection {
+                name: account,
+                start: clamped,
+                count: 1,
+            });
+        }
+
+        self.selected = clamped;
+    }
+
     pub fn start_search(&mut self) {
         let item_count = match &self.view {
-            View::EnvelopeList => self.envelopes.len(),
+            View::MessageList => self.envelopes.len(),
             View::FolderList(state) => state.folders.len(),
-            View::FolderEnvelopeList(state) => state.envelopes.len(),
             View::MoveFolderPicker(state) => state.folders.len(),
             View::AccountPicker(state) => state.accounts.len(),
             View::MessageRead { .. } => return, // no-op
@@ -343,9 +386,8 @@ impl App {
         }
         let original_index = search.matched_indices[search.selected];
         match &mut self.view {
-            View::EnvelopeList => self.selected = original_index,
+            View::MessageList => self.selected = original_index,
             View::FolderList(state) => state.selected = original_index,
-            View::FolderEnvelopeList(state) => state.selected = original_index,
             View::MoveFolderPicker(state) => state.selected = original_index,
             View::AccountPicker(state) => state.selected = original_index,
             View::MessageRead { .. } => {}
@@ -389,9 +431,8 @@ impl App {
 
         if search.query.is_empty() {
             let len = match &self.view {
-                View::EnvelopeList => self.envelopes.len(),
+                View::MessageList => self.envelopes.len(),
                 View::FolderList(state) => state.folders.len(),
-                View::FolderEnvelopeList(state) => state.envelopes.len(),
                 View::MoveFolderPicker(state) => state.folders.len(),
                 View::AccountPicker(state) => state.accounts.len(),
                 View::MessageRead { .. } => 0,
@@ -412,17 +453,12 @@ impl App {
         );
 
         let searchable_texts: Vec<String> = match &self.view {
-            View::EnvelopeList => self
+            View::MessageList => self
                 .envelopes
                 .iter()
                 .map(|e| format!("{} {}", e.subject, e.from))
                 .collect(),
             View::FolderList(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
-            View::FolderEnvelopeList(state) => state
-                .envelopes
-                .iter()
-                .map(|e| format!("{} {}", e.subject, e.from))
-                .collect(),
             View::MoveFolderPicker(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
             View::AccountPicker(state) => state.accounts.clone(),
             View::MessageRead { .. } => Vec::new(),
@@ -466,9 +502,9 @@ mod tests {
     fn new_app_defaults() {
         let app = App::new(vec![], "INBOX".to_string());
         assert_eq!(app.selected, 0);
-        assert_eq!(app.folder, "INBOX");
+        assert!(matches!(app.folder_context, FolderContext::AllInboxes));
         assert!(!app.should_quit);
-        assert!(matches!(app.view, View::EnvelopeList));
+        assert!(matches!(app.view, View::MessageList));
     }
 
     #[test]
@@ -519,6 +555,7 @@ mod tests {
 
         let env = Envelope {
             id: "42".to_string(),
+
             subject: "Test Subject".to_string(),
             from: Mailbox {
                 name: Some("Alice".to_string()),
@@ -710,7 +747,6 @@ mod tests {
             folders,
             sections: Vec::new(),
             selected,
-            saved_envelope_selected: 0,
         })
     }
 
@@ -779,87 +815,9 @@ mod tests {
     fn folder_select_noop_on_wrong_view() {
         let mut app = App::new(vec![], "INBOX".to_string());
         app.folder_select_next();
-        assert!(matches!(app.view, View::EnvelopeList));
+        assert!(matches!(app.view, View::MessageList));
         app.folder_select_prev();
-        assert!(matches!(app.view, View::EnvelopeList));
-    }
-
-    #[test]
-    fn folder_envelope_remove_basic() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![
-                make_envelope("1", "a"),
-                make_envelope("2", "b"),
-                make_envelope("3", "c"),
-            ],
-            selected: 1,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        let removed = state.remove_envelope(1);
-        assert_eq!(removed.unwrap().id, "2");
-        assert_eq!(state.envelopes.len(), 2);
-        assert_eq!(state.selected, 1);
-    }
-
-    #[test]
-    fn folder_envelope_remove_clamps_selected() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a"), make_envelope("2", "b")],
-            selected: 1,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        state.remove_envelope(1);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn folder_envelope_remove_only_item() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a")],
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        state.remove_envelope(0);
-        assert!(state.envelopes.is_empty());
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn folder_envelope_remove_out_of_bounds() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![],
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        assert!(state.remove_envelope(0).is_none());
+        assert!(matches!(app.view, View::MessageList));
     }
 
     #[test]
@@ -1020,8 +978,6 @@ mod tests {
             source_envelope_index: 0,
             source_folder: "INBOX".to_string(),
             account_key: String::new(),
-            return_to_folder: false,
-            folder_envelope_state: None,
         })
     }
 
@@ -1105,7 +1061,7 @@ mod tests {
         View::AccountPicker(AccountPickerState {
             accounts,
             selected,
-            previous_view: Box::new(View::EnvelopeList),
+            previous_view: Box::new(View::MessageList),
         })
     }
 
@@ -1180,5 +1136,237 @@ mod tests {
         } else {
             panic!("expected AccountPicker view");
         }
+    }
+
+    // --- insert_envelope tests ---
+
+    #[test]
+    fn insert_envelope_basic() {
+        let envelopes = vec![make_envelope("1", "a"), make_envelope("3", "c")];
+        let mut app = App::new(envelopes, "INBOX".to_string());
+        app.sections = vec![AccountSection {
+            name: String::new(),
+            start: 0,
+            count: 2,
+        }];
+        app.insert_envelope(1, make_envelope("2", "b"));
+        assert_eq!(app.envelopes.len(), 3);
+        assert_eq!(app.envelopes[1].id, "2");
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.sections[0].count, 3);
+    }
+
+    #[test]
+    fn insert_envelope_at_start() {
+        let envelopes = vec![make_envelope("2", "b")];
+        let mut app = App::new(envelopes, "INBOX".to_string());
+        app.sections = vec![AccountSection {
+            name: String::new(),
+            start: 0,
+            count: 1,
+        }];
+        app.insert_envelope(0, make_envelope("1", "a"));
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.envelopes[0].id, "1");
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn insert_envelope_clamps_past_end() {
+        let envelopes = vec![make_envelope("1", "a")];
+        let mut app = App::new(envelopes, "INBOX".to_string());
+        app.sections = vec![AccountSection {
+            name: String::new(),
+            start: 0,
+            count: 1,
+        }];
+        app.insert_envelope(100, make_envelope("2", "b"));
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.envelopes[1].id, "2");
+        assert_eq!(app.selected, 1); // clamped to end
+    }
+
+    #[test]
+    fn insert_envelope_into_empty() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.insert_envelope(0, make_envelope("1", "a"));
+        assert_eq!(app.envelopes.len(), 1);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.sections.len(), 1);
+        assert_eq!(app.sections[0].count, 1);
+    }
+
+    #[test]
+    fn insert_envelope_updates_sections() {
+        let mut env1 = make_envelope("1", "a");
+        env1.account = "work".to_string();
+        let mut env2 = make_envelope("2", "b");
+        env2.account = "personal".to_string();
+        let mut app = App::new(vec![env1, env2], "INBOX".to_string());
+        app.sections = vec![
+            AccountSection {
+                name: "work".to_string(),
+                start: 0,
+                count: 1,
+            },
+            AccountSection {
+                name: "personal".to_string(),
+                start: 1,
+                count: 1,
+            },
+        ];
+
+        let mut env3 = make_envelope("3", "c");
+        env3.account = "work".to_string();
+        app.insert_envelope(0, env3);
+
+        assert_eq!(app.sections[0].name, "work");
+        assert_eq!(app.sections[0].count, 2);
+        assert_eq!(app.sections[1].name, "personal");
+        assert_eq!(app.sections[1].start, 2); // shifted
+    }
+
+    #[test]
+    fn insert_envelope_creates_new_section() {
+        let mut env1 = make_envelope("1", "a");
+        env1.account = "work".to_string();
+        let mut app = App::new(vec![env1], "INBOX".to_string());
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 1,
+        }];
+
+        let mut env2 = make_envelope("2", "b");
+        env2.account = "personal".to_string();
+        app.insert_envelope(1, env2);
+
+        assert_eq!(app.sections.len(), 2);
+        assert_eq!(app.envelopes.len(), 2);
+    }
+
+    #[test]
+    fn insert_envelope_before_section_start() {
+        let mut env1 = make_envelope("1", "a");
+        env1.account = "other".to_string();
+        let mut env2 = make_envelope("2", "b");
+        env2.account = "other".to_string();
+        let mut env3 = make_envelope("3", "c");
+        env3.account = "work".to_string();
+        let mut app = App::new(vec![env1, env2, env3], "INBOX".to_string());
+        app.sections = vec![
+            AccountSection {
+                name: "other".to_string(),
+                start: 0,
+                count: 2,
+            },
+            AccountSection {
+                name: "work".to_string(),
+                start: 2,
+                count: 1,
+            },
+        ];
+
+        let mut env4 = make_envelope("4", "d");
+        env4.account = "work".to_string();
+        app.insert_envelope(0, env4);
+
+        assert_eq!(app.sections[1].name, "work");
+        assert_eq!(app.sections[1].start, 0);
+        assert_eq!(app.sections[1].count, 2);
+        assert_eq!(app.sections[0].start, 1);
+        assert_eq!(app.sections[0].count, 2);
+        assert_eq!(app.envelopes.len(), 4);
+    }
+
+    #[test]
+    fn remove_and_insert_roundtrip() {
+        let mut env1 = make_envelope("1", "a");
+        env1.account = "work".to_string();
+        let mut env2 = make_envelope("2", "b");
+        env2.account = "work".to_string();
+        let mut env3 = make_envelope("3", "c");
+        env3.account = "work".to_string();
+        let mut app = App::new(vec![env1, env2.clone(), env3], "INBOX".to_string());
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 3,
+        }];
+
+        // Remove index 1
+        let removed = app.remove_envelope(1).unwrap();
+        assert_eq!(removed.id, "2");
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.sections[0].count, 2);
+
+        // Re-insert at same index
+        app.insert_envelope(1, removed);
+        assert_eq!(app.envelopes.len(), 3);
+        assert_eq!(app.envelopes[1].id, "2");
+        assert_eq!(app.sections[0].count, 3);
+    }
+
+    // --- FolderContext tests ---
+
+    #[test]
+    fn folder_display_name_all_inboxes() {
+        let app = App::new(vec![], "INBOX".to_string());
+        assert_eq!(app.folder_display_name(), "INBOX");
+    }
+
+    #[test]
+    fn folder_display_name_single_folder() {
+        let mut app = App::new(vec![], "INBOX".to_string());
+        app.folder_context = FolderContext::SingleFolder {
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+        };
+        assert_eq!(app.folder_display_name(), "Sent");
+    }
+
+    #[test]
+    fn saved_list_state_roundtrip() {
+        let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
+        let sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 2,
+        }];
+        let mut app = App::new(envelopes.clone(), "INBOX".to_string());
+        app.sections = sections.clone();
+        app.selected = 1;
+
+        // Save state
+        app.saved_list_state = Some(SavedListState {
+            folder_context: app.folder_context.clone(),
+            envelopes: app.envelopes.clone(),
+            sections: app.sections.clone(),
+            selected: app.selected,
+        });
+
+        // Switch to a different folder
+        app.envelopes = vec![make_envelope("3", "c")];
+        app.sections = vec![AccountSection {
+            name: "work".to_string(),
+            start: 0,
+            count: 1,
+        }];
+        app.selected = 0;
+        app.folder_context = FolderContext::SingleFolder {
+            folder_name: "Sent".to_string(),
+            account_key: "work".to_string(),
+        };
+
+        // Restore state
+        let saved = app.saved_list_state.take().unwrap();
+        app.envelopes = saved.envelopes;
+        app.sections = saved.sections;
+        app.selected = saved.selected;
+        app.folder_context = saved.folder_context;
+
+        assert_eq!(app.envelopes.len(), 2);
+        assert_eq!(app.selected, 1);
+        assert!(matches!(app.folder_context, FolderContext::AllInboxes));
     }
 }

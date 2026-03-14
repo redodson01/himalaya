@@ -755,7 +755,7 @@ async fn run_event_loop(
                         };
                         if !advanced {
                             app.status = Some(Status::Info("No more messages".to_string()));
-                            continue;
+                            break;
                         }
                     }
 

@@ -8,7 +8,7 @@ pub enum Action {
     Quit,
     ReadMessage,
     BackToList,
-    BackToAllInboxes,
+    BackFromFolder,
     ScrollDown,
     ScrollUp,
     SelectNext,
@@ -22,7 +22,7 @@ pub enum Action {
     SelectFolder,
     FolderSelectNext,
     FolderSelectPrev,
-    BackFromFolders,
+    BackFromFolderPicker,
     StartSearch,
     SearchChar(char),
     SearchBackspace,
@@ -84,7 +84,7 @@ fn action_for_key(
         View::MessageList => match key {
             KeyCode::Esc | KeyCode::Char('q') => match folder_context {
                 FolderContext::AllInboxes => Action::Quit,
-                FolderContext::SingleFolder { .. } => Action::BackToAllInboxes,
+                FolderContext::SingleFolder { .. } => Action::BackFromFolder,
             },
             KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
@@ -104,7 +104,7 @@ fn action_for_key(
             _ => Action::None,
         },
         View::FolderList(_) => match key {
-            KeyCode::Esc | KeyCode::Char('q') => Action::BackFromFolders,
+            KeyCode::Esc | KeyCode::Char('q') => Action::BackFromFolderPicker,
             KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
             KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
             KeyCode::Enter => Action::SelectFolder,
@@ -192,18 +192,18 @@ mod tests {
     }
 
     #[test]
-    fn list_q_back_to_all_inboxes_in_single_folder() {
+    fn list_q_back_from_folder_in_single_folder() {
         assert_eq!(
             action_for_key(&list_view(), &single_folder(), KeyCode::Char('q'), false),
-            Action::BackToAllInboxes
+            Action::BackFromFolder
         );
     }
 
     #[test]
-    fn list_esc_back_to_all_inboxes_in_single_folder() {
+    fn list_esc_back_from_folder_in_single_folder() {
         assert_eq!(
             action_for_key(&list_view(), &single_folder(), KeyCode::Esc, false),
-            Action::BackToAllInboxes
+            Action::BackFromFolder
         );
     }
 
@@ -320,7 +320,7 @@ mod tests {
     fn folder_esc_goes_back() {
         assert_eq!(
             action_for_key(&folder_view(), &all_inboxes(), KeyCode::Esc, false),
-            Action::BackFromFolders
+            Action::BackFromFolderPicker
         );
     }
 
@@ -328,7 +328,7 @@ mod tests {
     fn folder_q_goes_back() {
         assert_eq!(
             action_for_key(&folder_view(), &all_inboxes(), KeyCode::Char('q'), false),
-            Action::BackFromFolders
+            Action::BackFromFolderPicker
         );
     }
 

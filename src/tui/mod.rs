@@ -544,7 +544,14 @@ async fn handle_compose(
     };
 
     if std::env::var("EDITOR").is_err() {
-        std::env::set_var("EDITOR", "vi");
+        // SAFETY: Called while the TUI event loop is paused (single
+        // thread of control). The `unused_unsafe` allow keeps this
+        // compiling on edition 2021 while being forward-compatible
+        // with edition 2024 where `set_var` becomes unsafe.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("EDITOR", "vi");
+        }
     }
 
     // Suspend TUI
@@ -647,7 +654,14 @@ async fn handle_edit_message(
     };
 
     if std::env::var("EDITOR").is_err() {
-        std::env::set_var("EDITOR", "vi");
+        // SAFETY: Called while the TUI event loop is paused (single
+        // thread of control). The `unused_unsafe` allow keeps this
+        // compiling on edition 2021 while being forward-compatible
+        // with edition 2024 where `set_var` becomes unsafe.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("EDITOR", "vi");
+        }
     }
 
     // Suspend TUI
@@ -790,8 +804,8 @@ async fn run_event_loop(
                     app.view = View::MessageList;
                     refresh_envelope_list(app, backends, terminal).await;
                 }
-                Action::BackToAllInboxes => {
-                    // Restore AllInboxes state from saved_list_state if available
+                Action::BackFromFolder => {
+                    // Restore previous list state from saved_list_state if available
                     if let Some(saved) = app.saved_list_state.take() {
                         app.envelopes = saved.envelopes;
                         app.sections = saved.sections;
@@ -1018,7 +1032,7 @@ async fn run_event_loop(
                         app.folder_select_prev();
                     }
                 }
-                Action::BackFromFolders => {
+                Action::BackFromFolderPicker => {
                     // Restore saved state
                     if let Some(saved) = app.saved_list_state.take() {
                         app.envelopes = saved.envelopes;

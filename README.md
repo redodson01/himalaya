@@ -528,11 +528,11 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 
 The interactive TUI mode (`--tui`) supports the following key bindings:
 
-### Envelope list
+### Message list (all inboxes / single folder)
 
 | Key | Action |
 |-----|--------|
-| `Esc` / `q` | Quit |
+| `Esc` / `q` | Quit (all inboxes) or back to previous view (single folder) |
 | `j` / `Down` | Select next envelope |
 | `k` / `Up` | Select previous envelope |
 | `Enter` | Read selected message |
@@ -553,30 +553,10 @@ The interactive TUI mode (`--tui`) supports the following key bindings:
 
 | Key | Action |
 |-----|--------|
-| `Esc` / `q` | Back to envelope list |
+| `Esc` / `q` | Back to message list |
 | `j` / `Down` | Select next folder |
 | `k` / `Up` | Select previous folder |
 | `Enter` | Open selected folder |
-| `/` | Search / filter list |
-
-### Folder envelope list
-
-| Key | Action |
-|-----|--------|
-| `Esc` / `q` | Back to folder list |
-| `j` / `Down` | Select next envelope |
-| `k` / `Up` | Select previous envelope |
-| `Enter` | Read selected message |
-| `r` | Toggle read/unread |
-| `f` | Toggle flagged |
-| `d` | Delete message |
-| `a` | Archive message |
-| `m` | Move message to folder |
-| `E` | Edit message (delete draft on send) |
-| `N` | Compose new message (account picker in multi-account mode) |
-| `R` | Reply to message |
-| `A` | Reply all |
-| `F` | Forward message |
 | `/` | Search / filter list |
 
 ### Message view

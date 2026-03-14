@@ -21,10 +21,11 @@ async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_err()
         && !std::env::args().any(|a| a == "--quiet" || a == "--debug" || a == "--trace")
     {
-        // SAFETY: Called before the tokio runtime starts; no other
-        // threads exist yet. The `unused_unsafe` allow keeps this
-        // compiling on edition 2021 while being forward-compatible
-        // with edition 2024 where `set_var` becomes unsafe.
+        // SAFETY: Called at the top of main before any tasks are
+        // spawned, so no other threads are reading the environment.
+        // The `unused_unsafe` allow keeps this compiling on edition
+        // 2021 while being forward-compatible with edition 2024
+        // where `set_var` becomes unsafe.
         #[allow(unused_unsafe)]
         unsafe {
             std::env::set_var("RUST_LOG", "warn,imap_codec=error");

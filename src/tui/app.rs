@@ -159,6 +159,7 @@ pub enum View {
 }
 
 pub enum Status {
+    Info(String),
     Working(String),
     Error(String),
 }
@@ -1045,8 +1046,7 @@ mod tests {
         app.start_search();
         app.search_push_char('1'); // should match "folder1"
         let search = app.search.as_ref().unwrap();
-        assert!(search.matched_indices.contains(&1));
-        assert!(!search.matched_indices.contains(&0) || !search.matched_indices.contains(&2));
+        assert_eq!(search.matched_indices, vec![1]);
     }
 
     #[test]
@@ -1129,8 +1129,7 @@ mod tests {
         app.start_search();
         app.search_push_char('1'); // should match "account1"
         let search = app.search.as_ref().unwrap();
-        assert!(search.matched_indices.contains(&1));
-        assert!(!search.matched_indices.contains(&0) || !search.matched_indices.contains(&2));
+        assert_eq!(search.matched_indices, vec![1]);
     }
 
     #[test]

@@ -754,7 +754,7 @@ async fn run_event_loop(
                             _ => false,
                         };
                         if !advanced {
-                            app.status = Some(Status::Working("No more messages".to_string()));
+                            app.status = Some(Status::Info("No more messages".to_string()));
                             continue;
                         }
                     }
@@ -868,8 +868,8 @@ async fn run_event_loop(
 
                         let mut error: Option<String> = None;
                         if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
-                            if let Ok(id) = id_str.parse::<usize>() {
-                                match backend.delete_messages(&folder, &[id]).await {
+                            match id_str.parse::<usize>() {
+                                Ok(id) => match backend.delete_messages(&folder, &[id]).await {
                                     Ok(_) => {
                                         if in_folder_context {
                                             // Remove from folder state and go back to folder envelope list
@@ -893,12 +893,16 @@ async fn run_event_loop(
                                                 app.view = View::EnvelopeList;
                                             }
                                         }
+                                        app.status = Some(Status::Info("Deleted".to_string()));
                                     }
                                     Err(e) => error = Some(format!("Delete failed: {e}")),
-                                }
+                                },
+                                Err(e) => error = Some(format!("Delete failed: {e}")),
                             }
                         }
-                        app.status = error.map(Status::Error);
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        }
                     }
                 }
                 Action::ToggleRead => {
@@ -1186,8 +1190,8 @@ async fn run_event_loop(
                         let mut error: Option<String> = None;
                         if let Some((backend, _, _, archive_folder, _)) = backends.get(&account_key)
                         {
-                            if let Ok(id) = id_str.parse::<usize>() {
-                                match backend
+                            match id_str.parse::<usize>() {
+                                Ok(id) => match backend
                                     .move_messages(&source_folder, archive_folder, &[id])
                                     .await
                                 {
@@ -1213,12 +1217,16 @@ async fn run_event_loop(
                                                 app.view = View::EnvelopeList;
                                             }
                                         }
+                                        app.status = Some(Status::Info("Archived".to_string()));
                                     }
                                     Err(e) => error = Some(format!("Archive failed: {e}")),
-                                }
+                                },
+                                Err(e) => error = Some(format!("Archive failed: {e}")),
                             }
                         }
-                        app.status = error.map(Status::Error);
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        }
                     }
                 }
                 Action::MoveMessage => {
@@ -1318,8 +1326,8 @@ async fn run_event_loop(
 
                             let mut error: Option<String> = None;
                             if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
-                                if let Ok(id) = id_str.parse::<usize>() {
-                                    match backend
+                                match id_str.parse::<usize>() {
+                                    Ok(id) => match backend
                                         .move_messages(&source_folder, &target_name, &[id])
                                         .await
                                     {
@@ -1347,14 +1355,15 @@ async fn run_event_loop(
                                                     // already set to EnvelopeList
                                                 }
                                             }
-                                            app.status = Some(Status::Working(format!(
+                                            app.status = Some(Status::Info(format!(
                                                 "Moved to {target_name}"
                                             )));
                                         }
                                         Err(e) => {
                                             error = Some(format!("Move failed: {e}"));
                                         }
-                                    }
+                                    },
+                                    Err(e) => error = Some(format!("Move failed: {e}")),
                                 }
                             }
                             if let Some(err) = error {

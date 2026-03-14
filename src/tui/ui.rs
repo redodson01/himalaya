@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::tui::app::{
     AccountPickerState, App, EnvelopeData, FolderEntry, FolderEnvelopeState, FolderSection,
-    MoveFolderPickerState, Status, View,
+    MoveFolderPickerState, SearchState, Status, View,
 };
 
 const FROM_COLOR: Color = Color::Cyan;
@@ -16,8 +16,11 @@ const FLAGGED_COLOR: Color = Color::Yellow;
 const HEADER_COLOR: Color = Color::Cyan;
 const SECTION_HEADER_COLOR: Color = Color::LightRed;
 
+/// Number of columns in envelope tables.
+const ENVELOPE_COL_COUNT: usize = 11;
+
 /// Column widths shared by all envelope tables (main list and folder envelope list).
-const ENVELOPE_WIDTHS: [Constraint; 11] = [
+const ENVELOPE_WIDTHS: [Constraint; ENVELOPE_COL_COUNT] = [
     Constraint::Length(1),
     Constraint::Length(6),
     Constraint::Length(1),
@@ -30,6 +33,36 @@ const ENVELOPE_WIDTHS: [Constraint; 11] = [
     Constraint::Length(1),
     Constraint::Length(16),
 ];
+
+/// Extract search-aware visible indices and the search-selected position from app state.
+fn search_visible_indices(
+    search: &Option<SearchState>,
+    item_count: usize,
+) -> (bool, usize, Vec<usize>) {
+    match search.as_ref() {
+        Some(s) => (true, s.selected, s.matched_indices.clone()),
+        None => (false, 0, (0..item_count).collect()),
+    }
+}
+
+/// Compute which table row to highlight, given search state and visible indices.
+fn highlight_row(
+    searching: bool,
+    search_selected: usize,
+    visible_indices: &[usize],
+    selected: usize,
+    item_to_table_row: &[usize],
+) -> usize {
+    let pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == selected)
+            .unwrap_or(0)
+    };
+    item_to_table_row.get(pos).copied().unwrap_or(0)
+}
 
 /// Build a table header row for envelope lists.
 fn envelope_header() -> Row<'static> {
@@ -198,7 +231,7 @@ fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &Ap
     };
     if let Some(status) = &app.status {
         let (msg, color) = match status {
-            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
             Status::Error(msg) => (msg.as_str(), Color::Red),
         };
         let line = Line::from(Span::styled(
@@ -215,16 +248,9 @@ fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &Ap
 fn render_envelope_list(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
-    let searching = app.search.is_some();
-    let matched_indices = app.search.as_ref().map(|s| &s.matched_indices[..]);
-    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
-
-    // Determine which envelope indices to show
-    let visible_indices: Vec<usize> = match matched_indices {
-        Some(indices) => indices.to_vec(),
-        None => (0..app.envelopes.len()).collect(),
-    };
-    let visible_set: std::collections::HashSet<usize> = visible_indices.iter().copied().collect();
+    let (searching, search_selected, vis) =
+        search_visible_indices(&app.search, app.envelopes.len());
+    let visible_set: std::collections::HashSet<usize> = vis.iter().copied().collect();
 
     // Build section starts for visible items only
     let section_starts: std::collections::HashMap<usize, (&str, bool)> = if searching {
@@ -257,16 +283,20 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
     let mut rows: Vec<Row> = Vec::new();
     let mut item_to_table_row: Vec<usize> = Vec::new();
 
-    for (pos, &i) in visible_indices.iter().enumerate() {
+    for (pos, &i) in vis.iter().enumerate() {
         let e = &app.envelopes[i];
         if let Some((account_name, is_first)) = section_starts.get(&i) {
             if !is_first {
-                rows.push(Row::new(std::iter::repeat_with(|| Cell::from("")).take(11)));
+                rows.push(Row::new(
+                    std::iter::repeat_with(|| Cell::from("")).take(ENVELOPE_COL_COUNT),
+                ));
             }
             let style = Style::default()
                 .fg(SECTION_HEADER_COLOR)
                 .add_modifier(Modifier::BOLD);
-            let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from("")).take(11).collect();
+            let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from(""))
+                .take(ENVELOPE_COL_COUNT)
+                .collect();
             cells[4] = Cell::from(account_name.to_string()).style(style);
             rows.push(Row::new(cells));
         }
@@ -289,15 +319,13 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
                 .title(format!(" {} ", app.folder)),
         );
 
-    let highlight_pos = if searching {
-        search_selected
-    } else {
-        visible_indices
-            .iter()
-            .position(|&i| i == app.selected)
-            .unwrap_or(0)
-    };
-    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &vis,
+        app.selected,
+        &item_to_table_row,
+    );
     let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
@@ -310,7 +338,7 @@ fn render_envelope_list(frame: &mut Frame, app: &App) {
 
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
-                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
                 Status::Error(msg) => (msg.as_str(), Color::Red),
             };
             Line::from(Span::styled(
@@ -358,14 +386,8 @@ fn render_folder_list(
 ) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let searching = app.search.is_some();
-    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
-
-    let visible_indices: Vec<usize> = match app.search.as_ref() {
-        Some(s) => s.matched_indices.clone(),
-        None => (0..folders.len()).collect(),
-    };
-    let visible_set: std::collections::HashSet<usize> = visible_indices.iter().copied().collect();
+    let (searching, search_selected, vis) = search_visible_indices(&app.search, folders.len());
+    let visible_set: std::collections::HashSet<usize> = vis.iter().copied().collect();
 
     let section_starts: std::collections::HashMap<usize, &str> = if searching {
         let mut map = std::collections::HashMap::new();
@@ -388,7 +410,7 @@ fn render_folder_list(
     let mut rows: Vec<Row> = Vec::new();
     let mut folder_to_table_row: Vec<usize> = Vec::new();
 
-    for &i in visible_indices.iter() {
+    for &i in vis.iter() {
         let f = &folders[i];
         if let Some(account_name) = section_starts.get(&i) {
             rows.push(Row::new([Cell::from("")]));
@@ -413,22 +435,20 @@ fn render_folder_list(
                 .title(" Select Folder "),
         );
 
-    let highlight_pos = if searching {
-        search_selected
-    } else {
-        visible_indices
-            .iter()
-            .position(|&i| i == selected)
-            .unwrap_or(0)
-    };
-    let table_selected = folder_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &vis,
+        selected,
+        &folder_to_table_row,
+    );
     let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
     if !render_search_bottom(frame, chunks[1], app) {
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
-                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
                 Status::Error(msg) => (msg.as_str(), Color::Red),
             };
             Line::from(Span::styled(
@@ -454,13 +474,8 @@ fn render_folder_list(
 fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(frame.area());
 
-    let searching = app.search.is_some();
-    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
-
-    let visible_indices: Vec<usize> = match app.search.as_ref() {
-        Some(s) => s.matched_indices.clone(),
-        None => (0..fe_state.envelopes.len()).collect(),
-    };
+    let (searching, search_selected, visible_indices) =
+        search_visible_indices(&app.search, fe_state.envelopes.len());
 
     let mut rows: Vec<Row> = Vec::new();
     let mut item_to_table_row: Vec<usize> = Vec::new();
@@ -470,7 +485,9 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
         let style = Style::default()
             .fg(SECTION_HEADER_COLOR)
             .add_modifier(Modifier::BOLD);
-        let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from("")).take(11).collect();
+        let mut cells: Vec<Cell> = std::iter::repeat_with(|| Cell::from(""))
+            .take(ENVELOPE_COL_COUNT)
+            .collect();
         cells[4] = Cell::from(fe_state.account_key.to_string()).style(style);
         rows.push(Row::new(cells));
     }
@@ -494,15 +511,13 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
                 .title(format!(" {} ", fe_state.folder_name)),
         );
 
-    let highlight_pos = if searching {
-        search_selected
-    } else {
-        visible_indices
-            .iter()
-            .position(|&i| i == fe_state.selected)
-            .unwrap_or(0)
-    };
-    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &visible_indices,
+        fe_state.selected,
+        &item_to_table_row,
+    );
     let mut table_state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
@@ -515,7 +530,7 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
 
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
-                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
                 Status::Error(msg) => (msg.as_str(), Color::Red),
             };
             Line::from(Span::styled(
@@ -555,13 +570,8 @@ fn render_folder_envelope_list(frame: &mut Frame, fe_state: &FolderEnvelopeState
 fn render_move_folder_picker(frame: &mut Frame, state: &MoveFolderPickerState, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let searching = app.search.is_some();
-    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
-
-    let visible_indices: Vec<usize> = match app.search.as_ref() {
-        Some(s) => s.matched_indices.clone(),
-        None => (0..state.folders.len()).collect(),
-    };
+    let (searching, search_selected, visible_indices) =
+        search_visible_indices(&app.search, state.folders.len());
 
     let mut rows: Vec<Row> = Vec::new();
     let mut folder_to_table_row: Vec<usize> = Vec::new();
@@ -594,22 +604,20 @@ fn render_move_folder_picker(frame: &mut Frame, state: &MoveFolderPickerState, a
                 .title(" Move to Folder "),
         );
 
-    let highlight_pos = if searching {
-        search_selected
-    } else {
-        visible_indices
-            .iter()
-            .position(|&i| i == state.selected)
-            .unwrap_or(0)
-    };
-    let table_selected = folder_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &visible_indices,
+        state.selected,
+        &folder_to_table_row,
+    );
     let mut table_state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
     if !render_search_bottom(frame, chunks[1], app) {
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
-                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
                 Status::Error(msg) => (msg.as_str(), Color::Red),
             };
             Line::from(Span::styled(
@@ -635,13 +643,8 @@ fn render_move_folder_picker(frame: &mut Frame, state: &MoveFolderPickerState, a
 fn render_account_picker(frame: &mut Frame, state: &AccountPickerState, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let searching = app.search.is_some();
-    let search_selected = app.search.as_ref().map(|s| s.selected).unwrap_or(0);
-
-    let visible_indices: Vec<usize> = match app.search.as_ref() {
-        Some(s) => s.matched_indices.clone(),
-        None => (0..state.accounts.len()).collect(),
-    };
+    let (searching, search_selected, visible_indices) =
+        search_visible_indices(&app.search, state.accounts.len());
 
     let mut rows: Vec<Row> = Vec::new();
     let mut item_to_table_row: Vec<usize> = Vec::new();
@@ -664,22 +667,20 @@ fn render_account_picker(frame: &mut Frame, state: &AccountPickerState, app: &Ap
                 .title(" Compose: Select Account "),
         );
 
-    let highlight_pos = if searching {
-        search_selected
-    } else {
-        visible_indices
-            .iter()
-            .position(|&i| i == state.selected)
-            .unwrap_or(0)
-    };
-    let table_selected = item_to_table_row.get(highlight_pos).copied().unwrap_or(0);
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &visible_indices,
+        state.selected,
+        &item_to_table_row,
+    );
     let mut table_state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut table_state);
 
     if !render_search_bottom(frame, chunks[1], app) {
         let status_line = if let Some(status) = &app.status {
             let (msg, color) = match status {
-                Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
                 Status::Error(msg) => (msg.as_str(), Color::Red),
             };
             Line::from(Span::styled(
@@ -763,7 +764,7 @@ fn render_message(
 
     let status_line = if let Some(s) = &app.status {
         let (msg, color) = match s {
-            Status::Working(msg) => (msg.as_str(), Color::Yellow),
+            Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
             Status::Error(msg) => (msg.as_str(), Color::Red),
         };
         Line::from(Span::styled(

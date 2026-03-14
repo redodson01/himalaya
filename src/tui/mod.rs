@@ -917,39 +917,50 @@ async fn run_event_loop(
 
                         let mut error: Option<String> = None;
                         if let Some((backend, _, _, _, _)) = backends.get(&ctx.account_key) {
-                            if let Ok(id) = ctx.id.parse::<usize>() {
-                                let seen = Flags::from_iter([Flag::Seen]);
-                                let result = if ctx.unseen {
-                                    backend.add_flags(&ctx.folder, &[id], &seen).await
-                                } else {
-                                    backend.remove_flags(&ctx.folder, &[id], &seen).await
-                                };
-                                match result {
-                                    Ok(_) => {
-                                        if let Some(env) = active_envelope_mut(app) {
-                                            if ctx.unseen {
-                                                env.unseen = false;
-                                                if !env.flags.contains('S') {
-                                                    env.flags =
-                                                        sort_flags(&format!("S{}", env.flags));
+                            match ctx.id.parse::<usize>() {
+                                Ok(id) => {
+                                    let seen = Flags::from_iter([Flag::Seen]);
+                                    let result = if ctx.unseen {
+                                        backend.add_flags(&ctx.folder, &[id], &seen).await
+                                    } else {
+                                        backend.remove_flags(&ctx.folder, &[id], &seen).await
+                                    };
+                                    match result {
+                                        Ok(_) => {
+                                            if let Some(env) = active_envelope_mut(app) {
+                                                if ctx.unseen {
+                                                    env.unseen = false;
+                                                    if !env.flags.contains('S') {
+                                                        env.flags =
+                                                            sort_flags(&format!("S{}", env.flags));
+                                                    }
+                                                } else {
+                                                    env.unseen = true;
+                                                    env.flags = env.flags.replace('S', "");
                                                 }
-                                            } else {
-                                                env.unseen = true;
-                                                env.flags = env.flags.replace('S', "");
                                             }
+                                            // If in main MessageRead, go back to list
+                                            if !in_folder_context
+                                                && !matches!(app.view, View::EnvelopeList)
+                                            {
+                                                app.view = View::EnvelopeList;
+                                            }
+                                            let msg = if ctx.unseen {
+                                                "Marked read"
+                                            } else {
+                                                "Marked unread"
+                                            };
+                                            app.status = Some(Status::Info(msg.to_string()));
                                         }
-                                        // If in main MessageRead, go back to list
-                                        if !in_folder_context
-                                            && !matches!(app.view, View::EnvelopeList)
-                                        {
-                                            app.view = View::EnvelopeList;
-                                        }
+                                        Err(e) => error = Some(format!("Toggle read failed: {e}")),
                                     }
-                                    Err(e) => error = Some(format!("Toggle read failed: {e}")),
                                 }
+                                Err(e) => error = Some(format!("Toggle read failed: {e}")),
                             }
                         }
-                        app.status = error.map(Status::Error);
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        }
                     }
                 }
                 Action::ToggleFlag => {
@@ -964,34 +975,43 @@ async fn run_event_loop(
 
                         let mut error: Option<String> = None;
                         if let Some((backend, _, _, _, _)) = backends.get(&ctx.account_key) {
-                            if let Ok(id) = ctx.id.parse::<usize>() {
-                                let flagged = Flags::from_iter([Flag::Flagged]);
-                                let result = if ctx.flagged {
-                                    backend.remove_flags(&ctx.folder, &[id], &flagged).await
-                                } else {
-                                    backend.add_flags(&ctx.folder, &[id], &flagged).await
-                                };
-                                match result {
-                                    Ok(_) => {
-                                        if let Some(env) = active_envelope_mut(app) {
-                                            env.flagged = !ctx.flagged;
-                                            if ctx.flagged {
-                                                env.flags = env.flags.replace('F', "");
-                                            } else if !env.flags.contains('F') {
-                                                env.flags = sort_flags(&format!("F{}", env.flags));
+                            match ctx.id.parse::<usize>() {
+                                Ok(id) => {
+                                    let flagged = Flags::from_iter([Flag::Flagged]);
+                                    let result = if ctx.flagged {
+                                        backend.remove_flags(&ctx.folder, &[id], &flagged).await
+                                    } else {
+                                        backend.add_flags(&ctx.folder, &[id], &flagged).await
+                                    };
+                                    match result {
+                                        Ok(_) => {
+                                            if let Some(env) = active_envelope_mut(app) {
+                                                env.flagged = !ctx.flagged;
+                                                if ctx.flagged {
+                                                    env.flags = env.flags.replace('F', "");
+                                                } else if !env.flags.contains('F') {
+                                                    env.flags =
+                                                        sort_flags(&format!("F{}", env.flags));
+                                                }
                                             }
+                                            if !in_folder_context
+                                                && !matches!(app.view, View::EnvelopeList)
+                                            {
+                                                app.view = View::EnvelopeList;
+                                            }
+                                            let msg =
+                                                if ctx.flagged { "Unflagged" } else { "Flagged" };
+                                            app.status = Some(Status::Info(msg.to_string()));
                                         }
-                                        if !in_folder_context
-                                            && !matches!(app.view, View::EnvelopeList)
-                                        {
-                                            app.view = View::EnvelopeList;
-                                        }
+                                        Err(e) => error = Some(format!("Flag toggle failed: {e}")),
                                     }
-                                    Err(e) => error = Some(format!("Flag toggle failed: {e}")),
                                 }
+                                Err(e) => error = Some(format!("Flag toggle failed: {e}")),
                             }
                         }
-                        app.status = error.map(Status::Error);
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        }
                     }
                 }
                 Action::OpenFolderList => {

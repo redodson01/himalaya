@@ -1313,7 +1313,12 @@ async fn run_event_loop(
                             let source_folder = state.source_folder.clone();
                             let id_str = state.source_envelope_id.clone();
                             let account_key = state.account_key.clone();
-                            let envelope_index = state.source_envelope_index;
+                            // Look up by ID in case the list changed since the picker opened.
+                            let envelope_index = app
+                                .envelopes
+                                .iter()
+                                .position(|e| e.id == id_str)
+                                .unwrap_or(state.source_envelope_index);
                             execute_message_op(
                                 app,
                                 terminal,

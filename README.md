@@ -72,13 +72,13 @@ Himalaya CLI can be installed with the `install.sh` installer:
 *As root:*
 
 ```
-curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh | sudo sh
+curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/main/install.sh | sudo sh
 ```
 
 *As a regular user:*
 
 ```
-curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh | PREFIX=~/.local sh
+curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/main/install.sh | PREFIX=~/.local sh
 ```
 
 These commands install the latest binary from the GitHub [releases](https://github.com/pimalaya/himalaya/releases) section.
@@ -167,7 +167,7 @@ nix-env -i himalaya
 You can also use the git repository for a more up-to-date (but less stable) version:
 
 ```
-nix-env -if https://github.com/pimalaya/himalaya/archive/master.tar.gz
+nix-env -if https://github.com/pimalaya/himalaya/archive/main.tar.gz
 ```
 
 *Or, from within the source tree checkout:*

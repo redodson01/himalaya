@@ -166,6 +166,7 @@ pub struct App {
     pub should_quit: bool,
     pub status: Option<Status>,
     pub search: Option<SearchState>,
+    pub needs_refresh: bool,
 }
 
 impl App {
@@ -180,6 +181,7 @@ impl App {
             should_quit: false,
             status: None,
             search: None,
+            needs_refresh: false,
         }
     }
 

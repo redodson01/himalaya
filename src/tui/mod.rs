@@ -394,6 +394,7 @@ async fn execute_message_op(
                 match result {
                     Ok(_) => {
                         app.remove_envelope(envelope_index);
+                        app.needs_refresh = true;
                         if !matches!(app.view, View::MessageList) {
                             app.view = View::MessageList;
                         }
@@ -901,7 +902,10 @@ async fn run_event_loop(
                 }
                 Action::BackToList => {
                     app.view = View::MessageList;
-                    refresh_envelope_list(app, backends, terminal).await;
+                    if app.needs_refresh {
+                        app.needs_refresh = false;
+                        refresh_envelope_list(app, backends, terminal).await;
+                    }
                 }
                 Action::BackFromFolder => {
                     // Restore previous list state from saved_list_state if available

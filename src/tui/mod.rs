@@ -1340,9 +1340,11 @@ async fn run_event_loop(
                     }
                 }
                 Action::EditMessage => {
-                    handle_edit_message(app, terminal, backends, default_account)
-                        .await
-                        .ok();
+                    if let Err(e) =
+                        handle_edit_message(app, terminal, backends, default_account).await
+                    {
+                        app.status = Some(Status::Error(format!("Edit failed: {e}")));
+                    }
                 }
                 Action::ComposeMessage => {
                     if backends.len() > 1 {
@@ -1354,17 +1356,17 @@ async fn run_event_loop(
                             selected: 0,
                             previous_view: Box::new(previous_view),
                         });
-                    } else {
-                        handle_compose(
-                            app,
-                            terminal,
-                            backends,
-                            default_account,
-                            ComposeKind::New,
-                            None,
-                        )
-                        .await
-                        .ok();
+                    } else if let Err(e) = handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::New,
+                        None,
+                    )
+                    .await
+                    {
+                        app.status = Some(Status::Error(format!("Compose failed: {e}")));
                     }
                 }
                 Action::ConfirmAccountPicker => {
@@ -1374,7 +1376,7 @@ async fn run_event_loop(
                         if let Some(account_key) = state.accounts.get(state.selected) {
                             let key = account_key.clone();
                             app.view = *state.previous_view;
-                            handle_compose(
+                            if let Err(e) = handle_compose(
                                 app,
                                 terminal,
                                 backends,
@@ -1383,7 +1385,9 @@ async fn run_event_loop(
                                 Some(&key),
                             )
                             .await
-                            .ok();
+                            {
+                                app.status = Some(Status::Error(format!("Compose failed: {e}")));
+                            }
                         }
                     }
                 }
@@ -1395,7 +1399,7 @@ async fn run_event_loop(
                     }
                 }
                 Action::ReplyMessage => {
-                    handle_compose(
+                    if let Err(e) = handle_compose(
                         app,
                         terminal,
                         backends,
@@ -1404,10 +1408,12 @@ async fn run_event_loop(
                         None,
                     )
                     .await
-                    .ok();
+                    {
+                        app.status = Some(Status::Error(format!("Reply failed: {e}")));
+                    }
                 }
                 Action::ReplyAllMessage => {
-                    handle_compose(
+                    if let Err(e) = handle_compose(
                         app,
                         terminal,
                         backends,
@@ -1416,10 +1422,12 @@ async fn run_event_loop(
                         None,
                     )
                     .await
-                    .ok();
+                    {
+                        app.status = Some(Status::Error(format!("Reply all failed: {e}")));
+                    }
                 }
                 Action::ForwardMessage => {
-                    handle_compose(
+                    if let Err(e) = handle_compose(
                         app,
                         terminal,
                         backends,
@@ -1428,7 +1436,9 @@ async fn run_event_loop(
                         None,
                     )
                     .await
-                    .ok();
+                    {
+                        app.status = Some(Status::Error(format!("Forward failed: {e}")));
+                    }
                 }
             }
 

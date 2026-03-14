@@ -320,6 +320,98 @@ fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
     app.envelopes.get_mut(app.selected)
 }
 
+/// The kind of message operation to execute.
+enum MessageOp {
+    Delete {
+        folder: String,
+    },
+    Archive {
+        source_folder: String,
+        target_folder: String,
+    },
+    Move {
+        source_folder: String,
+        target_folder: String,
+    },
+}
+
+impl MessageOp {
+    fn working_status(&self) -> String {
+        match self {
+            MessageOp::Delete { .. } => "Deleting\u{2026}".to_string(),
+            MessageOp::Archive { .. } => "Archiving\u{2026}".to_string(),
+            MessageOp::Move { target_folder, .. } => format!("Moving to {target_folder}\u{2026}"),
+        }
+    }
+
+    fn success_status(&self) -> String {
+        match self {
+            MessageOp::Delete { .. } => "Deleted".to_string(),
+            MessageOp::Archive { .. } => "Archived".to_string(),
+            MessageOp::Move { target_folder, .. } => format!("Moved to {target_folder}"),
+        }
+    }
+
+    fn error_prefix(&self) -> &'static str {
+        match self {
+            MessageOp::Delete { .. } => "Delete failed",
+            MessageOp::Archive { .. } => "Archive failed",
+            MessageOp::Move { .. } => "Move failed",
+        }
+    }
+}
+
+async fn execute_message_op(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    account_key: &str,
+    id_str: &str,
+    envelope_index: usize,
+    op: MessageOp,
+) -> Result<()> {
+    app.status = Some(Status::Working(op.working_status()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    let mut error: Option<String> = None;
+    if let Some((backend, _, _, _, _)) = backends.get(account_key) {
+        match id_str.parse::<usize>() {
+            Ok(id) => {
+                let result = match &op {
+                    MessageOp::Delete { folder } => backend.delete_messages(folder, &[id]).await,
+                    MessageOp::Archive {
+                        source_folder,
+                        target_folder,
+                    }
+                    | MessageOp::Move {
+                        source_folder,
+                        target_folder,
+                    } => {
+                        backend
+                            .move_messages(source_folder, target_folder, &[id])
+                            .await
+                    }
+                };
+                match result {
+                    Ok(_) => {
+                        app.remove_envelope(envelope_index);
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
+                        }
+                        app.status = Some(Status::Info(op.success_status()));
+                    }
+                    Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+                }
+            }
+            Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+        }
+    }
+    if let Some(err) = error {
+        app.status = Some(Status::Error(err));
+    }
+    Ok(())
+}
+
 /// Re-fetch the envelope list from backends, context-aware.
 async fn refresh_envelope_list(
     app: &mut App,
@@ -830,29 +922,16 @@ async fn run_event_loop(
                 }
                 Action::DeleteMessage => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
-                        let (id_str, account_key, folder) = (ctx.id, ctx.account_key, ctx.folder);
-                        app.status = Some(Status::Working("Deleting…".to_string()));
-                        terminal.draw(|frame| ui::render(frame, app))?;
-
-                        let mut error: Option<String> = None;
-                        if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
-                            match id_str.parse::<usize>() {
-                                Ok(id) => match backend.delete_messages(&folder, &[id]).await {
-                                    Ok(_) => {
-                                        app.remove_envelope(app.selected);
-                                        if !matches!(app.view, View::MessageList) {
-                                            app.view = View::MessageList;
-                                        }
-                                        app.status = Some(Status::Info("Deleted".to_string()));
-                                    }
-                                    Err(e) => error = Some(format!("Delete failed: {e}")),
-                                },
-                                Err(e) => error = Some(format!("Delete failed: {e}")),
-                            }
-                        }
-                        if let Some(err) = error {
-                            app.status = Some(Status::Error(err));
-                        }
+                        execute_message_op(
+                            app,
+                            terminal,
+                            backends,
+                            &ctx.account_key,
+                            &ctx.id,
+                            app.selected,
+                            MessageOp::Delete { folder: ctx.folder },
+                        )
+                        .await?;
                     }
                 }
                 Action::ToggleRead => {
@@ -1147,33 +1226,21 @@ async fn run_event_loop(
                 }
                 Action::ArchiveMessage => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
-                        let (id_str, account_key, source_folder) =
-                            (ctx.id, ctx.account_key, ctx.folder);
-                        app.status = Some(Status::Working("Archiving…".to_string()));
-                        terminal.draw(|frame| ui::render(frame, app))?;
-
-                        let mut error: Option<String> = None;
-                        if let Some((backend, _, _, archive_folder, _)) = backends.get(&account_key)
-                        {
-                            match id_str.parse::<usize>() {
-                                Ok(id) => match backend
-                                    .move_messages(&source_folder, archive_folder, &[id])
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        app.remove_envelope(app.selected);
-                                        if !matches!(app.view, View::MessageList) {
-                                            app.view = View::MessageList;
-                                        }
-                                        app.status = Some(Status::Info("Archived".to_string()));
-                                    }
-                                    Err(e) => error = Some(format!("Archive failed: {e}")),
+                        if let Some((_, _, _, archive_folder, _)) = backends.get(&ctx.account_key) {
+                            let archive_folder = archive_folder.clone();
+                            execute_message_op(
+                                app,
+                                terminal,
+                                backends,
+                                &ctx.account_key,
+                                &ctx.id,
+                                app.selected,
+                                MessageOp::Archive {
+                                    source_folder: ctx.folder,
+                                    target_folder: archive_folder,
                                 },
-                                Err(e) => error = Some(format!("Archive failed: {e}")),
-                            }
-                        }
-                        if let Some(err) = error {
-                            app.status = Some(Status::Error(err));
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -1239,35 +1306,20 @@ async fn run_event_loop(
                             let source_folder = state.source_folder.clone();
                             let id_str = state.source_envelope_id.clone();
                             let account_key = state.account_key.clone();
-                            let source_envelope_index = state.source_envelope_index;
-
-                            app.status = Some(Status::Working(format!("Moving to {target_name}…")));
-                            terminal.draw(|frame| ui::render(frame, app))?;
-
-                            let mut error: Option<String> = None;
-                            if let Some((backend, _, _, _, _)) = backends.get(&account_key) {
-                                match id_str.parse::<usize>() {
-                                    Ok(id) => match backend
-                                        .move_messages(&source_folder, &target_name, &[id])
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            app.remove_envelope(source_envelope_index);
-                                            app.view = View::MessageList;
-                                            app.status = Some(Status::Info(format!(
-                                                "Moved to {target_name}"
-                                            )));
-                                        }
-                                        Err(e) => {
-                                            error = Some(format!("Move failed: {e}"));
-                                        }
-                                    },
-                                    Err(e) => error = Some(format!("Move failed: {e}")),
-                                }
-                            }
-                            if let Some(err) = error {
-                                app.status = Some(Status::Error(err));
-                            }
+                            let envelope_index = state.source_envelope_index;
+                            execute_message_op(
+                                app,
+                                terminal,
+                                backends,
+                                &account_key,
+                                &id_str,
+                                envelope_index,
+                                MessageOp::Move {
+                                    source_folder,
+                                    target_folder: target_name,
+                                },
+                            )
+                            .await?;
                         }
                     }
                 }

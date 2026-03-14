@@ -22,6 +22,7 @@ pub fn sort_flags(flags: &str) -> String {
 }
 
 /// Owned envelope data extracted from pimalaya_tui's Envelope type.
+#[derive(Clone)]
 pub struct EnvelopeData {
     pub id: String,
     pub subject: String,
@@ -34,6 +35,7 @@ pub struct EnvelopeData {
 }
 
 /// Tracks a contiguous range of envelopes belonging to one account.
+#[derive(Clone)]
 pub struct AccountSection {
     pub name: String,
     pub start: usize,
@@ -98,34 +100,31 @@ pub struct SearchState {
     pub selected: usize,
 }
 
+/// Which folder context is currently being viewed.
+#[derive(Clone)]
+pub enum FolderContext {
+    /// Multi-account "all inboxes" virtual folder.
+    AllInboxes,
+    /// Single folder for a specific account.
+    SingleFolder {
+        folder_name: String,
+        account_key: String,
+    },
+}
+
+/// Saved state when navigating away from a message list (e.g. to folder list).
+#[derive(Clone)]
+pub struct SavedListState {
+    pub folder_context: FolderContext,
+    pub envelopes: Vec<EnvelopeData>,
+    pub sections: Vec<AccountSection>,
+    pub selected: usize,
+}
+
 pub struct FolderListState {
     pub folders: Vec<FolderEntry>,
     pub sections: Vec<FolderSection>,
     pub selected: usize,
-    pub saved_envelope_selected: usize,
-}
-
-pub struct FolderEnvelopeState {
-    pub envelopes: Vec<EnvelopeData>,
-    pub selected: usize,
-    pub folder_name: String,
-    pub account_key: String,
-    pub parent: FolderListState,
-}
-
-impl FolderEnvelopeState {
-    pub fn remove_envelope(&mut self, index: usize) -> Option<EnvelopeData> {
-        if index >= self.envelopes.len() {
-            return None;
-        }
-        let removed = self.envelopes.remove(index);
-        if !self.envelopes.is_empty() {
-            self.selected = self.selected.min(self.envelopes.len() - 1);
-        } else {
-            self.selected = 0;
-        }
-        Some(removed)
-    }
 }
 
 pub struct MoveFolderPickerState {
@@ -135,8 +134,6 @@ pub struct MoveFolderPickerState {
     pub source_envelope_index: usize,
     pub source_folder: String,
     pub account_key: String,
-    pub return_to_folder: bool,
-    pub folder_envelope_state: Option<Box<FolderEnvelopeState>>,
 }
 
 pub struct AccountPickerState {
@@ -146,14 +143,9 @@ pub struct AccountPickerState {
 }
 
 pub enum View {
-    EnvelopeList,
-    MessageRead {
-        content: String,
-        scroll: u16,
-        folder_context: Option<Box<FolderEnvelopeState>>,
-    },
+    MessageList,
+    MessageRead { content: String, scroll: u16 },
     FolderList(FolderListState),
-    FolderEnvelopeList(FolderEnvelopeState),
     MoveFolderPicker(MoveFolderPickerState),
     AccountPicker(AccountPickerState),
 }
@@ -169,23 +161,33 @@ pub struct App {
     pub sections: Vec<AccountSection>,
     pub selected: usize,
     pub view: View,
-    pub folder: String,
+    pub folder_context: FolderContext,
+    pub saved_list_state: Option<SavedListState>,
     pub should_quit: bool,
     pub status: Option<Status>,
     pub search: Option<SearchState>,
 }
 
 impl App {
-    pub fn new(envelopes: Vec<EnvelopeData>, folder: String) -> Self {
+    pub fn new(envelopes: Vec<EnvelopeData>) -> Self {
         Self {
             envelopes,
             sections: Vec::new(),
             selected: 0,
-            view: View::EnvelopeList,
-            folder,
+            view: View::MessageList,
+            folder_context: FolderContext::AllInboxes,
+            saved_list_state: None,
             should_quit: false,
             status: None,
             search: None,
+        }
+    }
+
+    /// Display name for the current folder context.
+    pub fn folder_display_name(&self) -> String {
+        match &self.folder_context {
+            FolderContext::AllInboxes => "INBOX".to_string(),
+            FolderContext::SingleFolder { folder_name, .. } => folder_name.clone(),
         }
     }
 
@@ -278,9 +280,8 @@ impl App {
 
     pub fn start_search(&mut self) {
         let item_count = match &self.view {
-            View::EnvelopeList => self.envelopes.len(),
+            View::MessageList => self.envelopes.len(),
             View::FolderList(state) => state.folders.len(),
-            View::FolderEnvelopeList(state) => state.envelopes.len(),
             View::MoveFolderPicker(state) => state.folders.len(),
             View::AccountPicker(state) => state.accounts.len(),
             View::MessageRead { .. } => return, // no-op
@@ -309,9 +310,8 @@ impl App {
         }
         let original_index = search.matched_indices[search.selected];
         match &mut self.view {
-            View::EnvelopeList => self.selected = original_index,
+            View::MessageList => self.selected = original_index,
             View::FolderList(state) => state.selected = original_index,
-            View::FolderEnvelopeList(state) => state.selected = original_index,
             View::MoveFolderPicker(state) => state.selected = original_index,
             View::AccountPicker(state) => state.selected = original_index,
             View::MessageRead { .. } => {}
@@ -355,9 +355,8 @@ impl App {
 
         if search.query.is_empty() {
             let len = match &self.view {
-                View::EnvelopeList => self.envelopes.len(),
+                View::MessageList => self.envelopes.len(),
                 View::FolderList(state) => state.folders.len(),
-                View::FolderEnvelopeList(state) => state.envelopes.len(),
                 View::MoveFolderPicker(state) => state.folders.len(),
                 View::AccountPicker(state) => state.accounts.len(),
                 View::MessageRead { .. } => 0,
@@ -378,17 +377,12 @@ impl App {
         );
 
         let searchable_texts: Vec<String> = match &self.view {
-            View::EnvelopeList => self
+            View::MessageList => self
                 .envelopes
                 .iter()
                 .map(|e| format!("{} {}", e.subject, e.from))
                 .collect(),
             View::FolderList(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
-            View::FolderEnvelopeList(state) => state
-                .envelopes
-                .iter()
-                .map(|e| format!("{} {}", e.subject, e.from))
-                .collect(),
             View::MoveFolderPicker(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
             View::AccountPicker(state) => state.accounts.clone(),
             View::MessageRead { .. } => Vec::new(),
@@ -430,17 +424,17 @@ mod tests {
 
     #[test]
     fn new_app_defaults() {
-        let app = App::new(vec![], "INBOX".to_string());
+        let app = App::new(vec![]);
         assert_eq!(app.selected, 0);
-        assert_eq!(app.folder, "INBOX");
+        assert!(matches!(app.folder_context, FolderContext::AllInboxes));
         assert!(!app.should_quit);
-        assert!(matches!(app.view, View::EnvelopeList));
+        assert!(matches!(app.view, View::MessageList));
     }
 
     #[test]
     fn select_next_advances() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         assert_eq!(app.selected, 0);
         app.select_next();
         assert_eq!(app.selected, 1);
@@ -449,7 +443,7 @@ mod tests {
     #[test]
     fn select_next_clamps_at_end() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.select_next();
         app.select_next();
         app.select_next();
@@ -458,7 +452,7 @@ mod tests {
 
     #[test]
     fn select_next_empty_list() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.select_next();
         assert_eq!(app.selected, 0);
     }
@@ -466,7 +460,7 @@ mod tests {
     #[test]
     fn select_prev_decrements() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 1;
         app.select_prev();
         assert_eq!(app.selected, 0);
@@ -474,7 +468,7 @@ mod tests {
 
     #[test]
     fn select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![make_envelope("1", "a")], "INBOX".to_string());
+        let mut app = App::new(vec![make_envelope("1", "a")]);
         app.select_prev();
         assert_eq!(app.selected, 0);
     }
@@ -557,7 +551,7 @@ mod tests {
                 count: 1,
             },
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+        let mut app = App::new(envelopes).with_sections(sections);
 
         assert_eq!(app.selected, 0);
         app.select_next();
@@ -577,7 +571,7 @@ mod tests {
             make_envelope("2", "b"),
             make_envelope("3", "c"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 1;
         let removed = app.remove_envelope(1);
         assert_eq!(removed.unwrap().id, "2");
@@ -589,7 +583,7 @@ mod tests {
     #[test]
     fn remove_envelope_last_item() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 1;
         app.remove_envelope(1);
         assert_eq!(app.envelopes.len(), 1);
@@ -599,7 +593,7 @@ mod tests {
     #[test]
     fn remove_envelope_only_item() {
         let envelopes = vec![make_envelope("1", "a")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.remove_envelope(0);
         assert!(app.envelopes.is_empty());
         assert_eq!(app.selected, 0);
@@ -607,7 +601,7 @@ mod tests {
 
     #[test]
     fn remove_envelope_out_of_bounds() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         assert!(app.remove_envelope(0).is_none());
     }
 
@@ -631,7 +625,7 @@ mod tests {
                 count: 2,
             },
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+        let mut app = App::new(envelopes).with_sections(sections);
 
         // Remove from first section
         app.remove_envelope(0);
@@ -656,7 +650,7 @@ mod tests {
                 count: 1,
             },
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+        let mut app = App::new(envelopes).with_sections(sections);
 
         // Remove only item in first section
         app.remove_envelope(0);
@@ -676,13 +670,12 @@ mod tests {
             folders,
             sections: Vec::new(),
             selected,
-            saved_envelope_selected: 0,
         })
     }
 
     #[test]
     fn folder_select_next_advances() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(3, 0);
         app.folder_select_next();
         if let View::FolderList(state) = &app.view {
@@ -694,7 +687,7 @@ mod tests {
 
     #[test]
     fn folder_select_next_clamps_at_end() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(2, 1);
         app.folder_select_next();
         app.folder_select_next();
@@ -707,7 +700,7 @@ mod tests {
 
     #[test]
     fn folder_select_next_empty_list() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(0, 0);
         app.folder_select_next();
         if let View::FolderList(state) = &app.view {
@@ -719,7 +712,7 @@ mod tests {
 
     #[test]
     fn folder_select_prev_decrements() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(3, 2);
         app.folder_select_prev();
         if let View::FolderList(state) = &app.view {
@@ -731,7 +724,7 @@ mod tests {
 
     #[test]
     fn folder_select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(3, 0);
         app.folder_select_prev();
         if let View::FolderList(state) = &app.view {
@@ -743,89 +736,11 @@ mod tests {
 
     #[test]
     fn folder_select_noop_on_wrong_view() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.folder_select_next();
-        assert!(matches!(app.view, View::EnvelopeList));
+        assert!(matches!(app.view, View::MessageList));
         app.folder_select_prev();
-        assert!(matches!(app.view, View::EnvelopeList));
-    }
-
-    #[test]
-    fn folder_envelope_remove_basic() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![
-                make_envelope("1", "a"),
-                make_envelope("2", "b"),
-                make_envelope("3", "c"),
-            ],
-            selected: 1,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        let removed = state.remove_envelope(1);
-        assert_eq!(removed.unwrap().id, "2");
-        assert_eq!(state.envelopes.len(), 2);
-        assert_eq!(state.selected, 1);
-    }
-
-    #[test]
-    fn folder_envelope_remove_clamps_selected() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a"), make_envelope("2", "b")],
-            selected: 1,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        state.remove_envelope(1);
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn folder_envelope_remove_only_item() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![make_envelope("1", "a")],
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        state.remove_envelope(0);
-        assert!(state.envelopes.is_empty());
-        assert_eq!(state.selected, 0);
-    }
-
-    #[test]
-    fn folder_envelope_remove_out_of_bounds() {
-        let mut state = FolderEnvelopeState {
-            envelopes: vec![],
-            selected: 0,
-            folder_name: "Sent".to_string(),
-            account_key: String::new(),
-            parent: FolderListState {
-                folders: Vec::new(),
-                sections: Vec::new(),
-                selected: 0,
-                saved_envelope_selected: 0,
-            },
-        };
-        assert!(state.remove_envelope(0).is_none());
+        assert!(matches!(app.view, View::MessageList));
     }
 
     #[test]
@@ -842,7 +757,7 @@ mod tests {
     #[test]
     fn start_search_initializes_all_indices() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         let search = app.search.as_ref().unwrap();
         assert_eq!(search.query, "");
@@ -857,7 +772,7 @@ mod tests {
             make_envelope("2", "goodbye"),
             make_envelope("3", "hello there"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         app.search_push_char('h');
         app.search_push_char('e');
@@ -874,7 +789,7 @@ mod tests {
             make_envelope("1", "hello world"),
             make_envelope("2", "goodbye"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         app.search_push_char('h');
         app.search_push_char('e');
@@ -892,7 +807,7 @@ mod tests {
             make_envelope("2", "beta"),
             make_envelope("3", "gamma"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         // Filter to just "beta" (index 1)
         app.search_push_char('b');
@@ -911,7 +826,7 @@ mod tests {
     #[test]
     fn confirm_search_empty_results_noop() {
         let envelopes = vec![make_envelope("1", "hello")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 0;
         app.start_search();
         app.search_push_char('z');
@@ -925,7 +840,7 @@ mod tests {
 
     #[test]
     fn cancel_search_clears_state() {
-        let mut app = App::new(vec![make_envelope("1", "a")], "INBOX".to_string());
+        let mut app = App::new(vec![make_envelope("1", "a")]);
         app.start_search();
         assert!(app.search.is_some());
         app.cancel_search();
@@ -939,7 +854,7 @@ mod tests {
             make_envelope("2", "ab"),
             make_envelope("3", "ac"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         // All 3 matched
         assert_eq!(app.search.as_ref().unwrap().selected, 0);
@@ -959,7 +874,7 @@ mod tests {
 
     #[test]
     fn search_empty_list() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.start_search();
         let search = app.search.as_ref().unwrap();
         assert!(search.matched_indices.is_empty());
@@ -986,14 +901,12 @@ mod tests {
             source_envelope_index: 0,
             source_folder: "INBOX".to_string(),
             account_key: String::new(),
-            return_to_folder: false,
-            folder_envelope_state: None,
         })
     }
 
     #[test]
     fn move_picker_select_next_advances() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0);
         app.folder_select_next();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1005,7 +918,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_next_clamps() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(2, 1);
         app.folder_select_next();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1017,7 +930,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_prev_decrements() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 2);
         app.folder_select_prev();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1029,7 +942,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0);
         app.folder_select_prev();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1041,7 +954,7 @@ mod tests {
 
     #[test]
     fn move_picker_search_filters_folders() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0); // folder0, folder1, folder2
         app.start_search();
         app.search_push_char('1'); // should match "folder1"
@@ -1051,7 +964,7 @@ mod tests {
 
     #[test]
     fn move_picker_confirm_search_maps_selection() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0);
         app.start_search();
         app.search_push_char('2'); // match folder2 at index 2
@@ -1070,13 +983,13 @@ mod tests {
         View::AccountPicker(AccountPickerState {
             accounts,
             selected,
-            previous_view: Box::new(View::EnvelopeList),
+            previous_view: Box::new(View::MessageList),
         })
     }
 
     #[test]
     fn account_picker_select_next_advances() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0);
         app.folder_select_next();
         if let View::AccountPicker(state) = &app.view {
@@ -1088,7 +1001,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_next_clamps() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(2, 1);
         app.folder_select_next();
         if let View::AccountPicker(state) = &app.view {
@@ -1100,7 +1013,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_prev_decrements() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 2);
         app.folder_select_prev();
         if let View::AccountPicker(state) = &app.view {
@@ -1112,7 +1025,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0);
         app.folder_select_prev();
         if let View::AccountPicker(state) = &app.view {
@@ -1124,7 +1037,7 @@ mod tests {
 
     #[test]
     fn account_picker_search_filters() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0); // account0, account1, account2
         app.start_search();
         app.search_push_char('1'); // should match "account1"
@@ -1134,7 +1047,7 @@ mod tests {
 
     #[test]
     fn account_picker_confirm_search_maps_selection() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0);
         app.start_search();
         app.search_push_char('2'); // match account2 at index 2

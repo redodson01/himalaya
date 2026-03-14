@@ -218,7 +218,7 @@ async fn run_single_account(config: TomlConfig, account: Option<String>) -> Resu
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
 
-    let mut app = App::new(Vec::new(), "INBOX".to_string());
+    let mut app = App::new(Vec::new());
     app.status = Some(Status::Working("Connecting…".to_string()));
     app.pending_refreshes = 1;
 
@@ -247,7 +247,7 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
 
-    let mut app = App::new(Vec::new(), "INBOX".to_string());
+    let mut app = App::new(Vec::new());
     app.status = Some(Status::Working("Connecting…".to_string()));
     app.pending_refreshes = account_names.len();
 
@@ -449,7 +449,7 @@ fn apply_backend_result(
                     let new_count = envelopes.len();
 
                     app.envelopes
-                        .splice(old_start..old_start + old_count, envelopes.clone());
+                        .splice(old_start..old_start + old_count, envelopes);
 
                     app.sections[si].count = new_count;
 
@@ -462,7 +462,7 @@ fn apply_backend_result(
                 } else {
                     let count = envelopes.len();
                     let start = app.envelopes.len();
-                    app.envelopes.extend(envelopes.clone());
+                    app.envelopes.extend(envelopes);
                     app.sections.push(AccountSection {
                         name: account.clone(),
                         start,
@@ -648,13 +648,22 @@ fn apply_backend_result(
 fn apply_local_revert(app: &mut App, action: UndoAction) {
     match action {
         UndoAction::Delete {
-            envelope, index, ..
+            envelope,
+            index,
+            dest_index: _,
+            ..
         }
         | UndoAction::Archive {
-            envelope, index, ..
+            envelope,
+            index,
+            dest_index: _,
+            ..
         }
         | UndoAction::Move {
-            envelope, index, ..
+            envelope,
+            index,
+            dest_index: _,
+            ..
         } => {
             app.insert_envelope(index, envelope);
         }
@@ -1412,6 +1421,7 @@ async fn run_event_loop(
                                     account_key: account_key.clone(),
                                     folder: folder.clone(),
                                     dest_id: None,
+                                    dest_index: None,
                                 });
                                 tokio::spawn(async move {
                                     match backend.delete_messages(&folder, &[id]).await {
@@ -1423,6 +1433,7 @@ async fn run_event_loop(
                                                     account_key: account_key.clone(),
                                                     folder: folder.clone(),
                                                     dest_id: dest_ids,
+                                                    dest_index: None,
                                                 }
                                             });
                                             let _ = tx.send(BackendResult::MutationDone {
@@ -1822,6 +1833,7 @@ async fn run_event_loop(
                                         source_folder: source_folder.clone(),
                                         archive_folder: archive_folder.clone(),
                                         dest_id: None,
+                                        dest_index: None,
                                     });
                                 tokio::spawn(async move {
                                     match backend
@@ -1837,6 +1849,7 @@ async fn run_event_loop(
                                                     source_folder: source_folder.clone(),
                                                     archive_folder: archive_folder.clone(),
                                                     dest_id: dest_ids,
+                                                    dest_index: None,
                                                 });
                                             let _ = tx.send(BackendResult::MutationDone {
                                                 undo_action: Box::new(undo_action),
@@ -1943,6 +1956,7 @@ async fn run_event_loop(
                                             source_folder: source_folder.clone(),
                                             target_folder: target_name_clone.clone(),
                                             dest_id: None,
+                                            dest_index: None,
                                         });
                                     tokio::spawn(async move {
                                         match backend
@@ -1962,6 +1976,7 @@ async fn run_event_loop(
                                                         source_folder: source_folder.clone(),
                                                         target_folder: target_name_clone.clone(),
                                                         dest_id: dest_ids,
+                                                        dest_index: None,
                                                     }
                                                 });
                                                 let _ = tx.send(BackendResult::MutationDone {
@@ -1997,17 +2012,28 @@ async fn run_event_loop(
                                 account_key,
                                 folder,
                                 dest_id,
+                                dest_index: _,
                             } => {
-                                // Check if undo's folder matches current context
-                                let matches_context = match &app.folder_context {
+                                let matches_source = match &app.folder_context {
                                     FolderContext::AllInboxes => true,
                                     FolderContext::SingleFolder {
                                         folder_name: f,
                                         account_key: a,
                                     } => *f == folder && *a == account_key,
                                 };
-                                if matches_context {
+                                let mut dest_removal_pos: Option<usize> = None;
+                                if matches_source {
                                     app.insert_envelope(index, envelope.clone());
+                                } else if let Some(ref ids) = dest_id {
+                                    // Viewing destination folder — remove the message
+                                    if let Some(id_str) = ids.first() {
+                                        if let Some(pos) =
+                                            app.envelopes.iter().position(|e| e.id == *id_str)
+                                        {
+                                            app.remove_envelope(pos);
+                                            dest_removal_pos = Some(pos);
+                                        }
+                                    }
                                 }
                                 if matches!(app.view, View::MessageRead { .. }) {
                                     app.view = View::MessageList;
@@ -2036,6 +2062,7 @@ async fn run_event_loop(
                                             account_key,
                                             folder,
                                             dest_id: new_dest_ids,
+                                            dest_index: dest_removal_pos,
                                         },
                                         true,
                                     );
@@ -2048,16 +2075,27 @@ async fn run_event_loop(
                                 source_folder,
                                 archive_folder,
                                 dest_id,
+                                dest_index: _,
                             } => {
-                                let matches_context = match &app.folder_context {
+                                let matches_source = match &app.folder_context {
                                     FolderContext::AllInboxes => true,
                                     FolderContext::SingleFolder {
                                         folder_name: f,
                                         account_key: a,
                                     } => *f == source_folder && *a == account_key,
                                 };
-                                if matches_context {
+                                let mut dest_removal_pos: Option<usize> = None;
+                                if matches_source {
                                     app.insert_envelope(index, envelope.clone());
+                                } else if let Some(ref ids) = dest_id {
+                                    if let Some(id_str) = ids.first() {
+                                        if let Some(pos) =
+                                            app.envelopes.iter().position(|e| e.id == *id_str)
+                                        {
+                                            app.remove_envelope(pos);
+                                            dest_removal_pos = Some(pos);
+                                        }
+                                    }
                                 }
                                 if matches!(app.view, View::MessageRead { .. }) {
                                     app.view = View::MessageList;
@@ -2085,6 +2123,7 @@ async fn run_event_loop(
                                             source_folder,
                                             archive_folder,
                                             dest_id: new_dest_ids,
+                                            dest_index: dest_removal_pos,
                                         },
                                         true,
                                     );
@@ -2097,16 +2136,27 @@ async fn run_event_loop(
                                 source_folder,
                                 target_folder,
                                 dest_id,
+                                dest_index: _,
                             } => {
-                                let matches_context = match &app.folder_context {
+                                let matches_source = match &app.folder_context {
                                     FolderContext::AllInboxes => true,
                                     FolderContext::SingleFolder {
                                         folder_name: f,
                                         account_key: a,
                                     } => *f == source_folder && *a == account_key,
                                 };
-                                if matches_context {
+                                let mut dest_removal_pos: Option<usize> = None;
+                                if matches_source {
                                     app.insert_envelope(index, envelope.clone());
+                                } else if let Some(ref ids) = dest_id {
+                                    if let Some(id_str) = ids.first() {
+                                        if let Some(pos) =
+                                            app.envelopes.iter().position(|e| e.id == *id_str)
+                                        {
+                                            app.remove_envelope(pos);
+                                            dest_removal_pos = Some(pos);
+                                        }
+                                    }
                                 }
                                 if matches!(app.view, View::MessageRead { .. }) {
                                     app.view = View::MessageList;
@@ -2134,6 +2184,7 @@ async fn run_event_loop(
                                             source_folder,
                                             target_folder,
                                             dest_id: new_dest_ids,
+                                            dest_index: dest_removal_pos,
                                         },
                                         true,
                                     );
@@ -2236,6 +2287,7 @@ async fn run_event_loop(
                                 account_key,
                                 folder,
                                 dest_id,
+                                dest_index,
                             } => {
                                 let env_id = envelope.id.clone();
                                 let dest_id_str = dest_id
@@ -2253,6 +2305,12 @@ async fn run_event_loop(
                                         pos,
                                     )
                                 } else {
+                                    if let Some(di) = dest_index {
+                                        if !matches!(app.folder_context, FolderContext::AllInboxes)
+                                        {
+                                            app.insert_envelope(di, envelope.clone());
+                                        }
+                                    }
                                     (envelope.clone(), index)
                                 };
                                 if matches!(app.view, View::MessageRead { .. }) {
@@ -2277,6 +2335,7 @@ async fn run_event_loop(
                                             account_key,
                                             folder,
                                             dest_id: new_dest_ids,
+                                            dest_index: None,
                                         },
                                         false,
                                     );
@@ -2289,6 +2348,7 @@ async fn run_event_loop(
                                 source_folder,
                                 archive_folder,
                                 dest_id,
+                                dest_index,
                             } => {
                                 let env_id = envelope.id.clone();
                                 let dest_id_str = dest_id
@@ -2306,6 +2366,12 @@ async fn run_event_loop(
                                         pos,
                                     )
                                 } else {
+                                    if let Some(di) = dest_index {
+                                        if !matches!(app.folder_context, FolderContext::AllInboxes)
+                                        {
+                                            app.insert_envelope(di, envelope.clone());
+                                        }
+                                    }
                                     (envelope.clone(), index)
                                 };
                                 if matches!(app.view, View::MessageRead { .. }) {
@@ -2333,6 +2399,7 @@ async fn run_event_loop(
                                             source_folder,
                                             archive_folder,
                                             dest_id: new_dest_ids,
+                                            dest_index: None,
                                         },
                                         false,
                                     );
@@ -2345,6 +2412,7 @@ async fn run_event_loop(
                                 source_folder,
                                 target_folder,
                                 dest_id,
+                                dest_index,
                             } => {
                                 let env_id = envelope.id.clone();
                                 let dest_id_str = dest_id
@@ -2362,6 +2430,12 @@ async fn run_event_loop(
                                         pos,
                                     )
                                 } else {
+                                    if let Some(di) = dest_index {
+                                        if !matches!(app.folder_context, FolderContext::AllInboxes)
+                                        {
+                                            app.insert_envelope(di, envelope.clone());
+                                        }
+                                    }
                                     (envelope.clone(), index)
                                 };
                                 if matches!(app.view, View::MessageRead { .. }) {
@@ -2389,6 +2463,7 @@ async fn run_event_loop(
                                             source_folder,
                                             target_folder,
                                             dest_id: new_dest_ids,
+                                            dest_index: None,
                                         },
                                         false,
                                     );
@@ -2645,7 +2720,7 @@ mod tests {
     #[test]
     fn envelopes_loaded_appends_new_account() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.pending_refreshes = 1;
         app.status = Some(Status::Working("Loading…".to_string()));
 
@@ -2676,10 +2751,7 @@ mod tests {
     #[test]
     fn envelopes_loaded_replaces_existing_account() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(
-            vec![make_envelope_for("1", "Old", "work")],
-            "INBOX".to_string(),
-        );
+        let mut app = App::new(vec![make_envelope_for("1", "Old", "work")]);
         app.sections = vec![AccountSection {
             name: "work".to_string(),
             start: 0,
@@ -2711,7 +2783,7 @@ mod tests {
     #[test]
     fn envelopes_loaded_multi_account_sorts_sections() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.pending_refreshes = 2;
         app.status = Some(Status::Working("Loading…".to_string()));
 
@@ -2749,14 +2821,11 @@ mod tests {
     #[test]
     fn envelopes_loaded_clamps_selection() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(
-            vec![
-                make_envelope_for("1", "a", "work"),
-                make_envelope_for("2", "b", "work"),
-                make_envelope_for("3", "c", "work"),
-            ],
-            "INBOX".to_string(),
-        );
+        let mut app = App::new(vec![
+            make_envelope_for("1", "a", "work"),
+            make_envelope_for("2", "b", "work"),
+            make_envelope_for("3", "c", "work"),
+        ]);
         app.sections = vec![AccountSection {
             name: "work".to_string(),
             start: 0,
@@ -2784,7 +2853,7 @@ mod tests {
     #[test]
     fn folders_loaded_transitions_to_folder_list() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.status = Some(Status::Working("Loading folders…".to_string()));
 
         let folders = vec![
@@ -2814,10 +2883,7 @@ mod tests {
 
     #[test]
     fn folder_context_switch_saves_and_restores() {
-        let mut app = App::new(
-            vec![make_envelope("1", "a"), make_envelope("2", "b")],
-            "INBOX".to_string(),
-        );
+        let mut app = App::new(vec![make_envelope("1", "a"), make_envelope("2", "b")]);
         app.sections = vec![AccountSection {
             name: "work".to_string(),
             start: 0,
@@ -2866,7 +2932,7 @@ mod tests {
     #[test]
     fn mutation_done_pushes_undo_action() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.status = Some(Status::Working("Deleting…".to_string()));
 
         let envelope = make_envelope("1", "test");
@@ -2876,6 +2942,7 @@ mod tests {
             account_key: "work".to_string(),
             folder: "INBOX".to_string(),
             dest_id: Some(vec!["42".to_string()]),
+            dest_index: None,
         };
 
         apply_backend_result(
@@ -2895,7 +2962,7 @@ mod tests {
     #[test]
     fn error_with_revert_applies_local_revert() {
         let (mut backends, tx, _rx) = test_fixtures();
-        let mut app = App::new(vec![make_envelope("2", "b")], "INBOX".to_string());
+        let mut app = App::new(vec![make_envelope("2", "b")]);
         app.sections = vec![AccountSection {
             name: "work".to_string(),
             start: 0,
@@ -2910,6 +2977,7 @@ mod tests {
             account_key: "work".to_string(),
             folder: "INBOX".to_string(),
             dest_id: None,
+            dest_index: None,
         };
 
         apply_backend_result(

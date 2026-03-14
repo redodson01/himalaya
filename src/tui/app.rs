@@ -188,6 +188,9 @@ pub enum UndoAction {
         /// UIDPLUS destination ID(s) returned by the server after the move.
         /// Used to reliably locate the message in the destination folder.
         dest_id: Option<Vec<String>>,
+        /// Position the message was removed from in the destination folder during undo.
+        /// Used by redo to re-insert at the correct spot.
+        dest_index: Option<usize>,
     },
     /// Archive moved message to archive folder — undo moves it back.
     Archive {
@@ -197,6 +200,7 @@ pub enum UndoAction {
         source_folder: String,
         archive_folder: String,
         dest_id: Option<Vec<String>>,
+        dest_index: Option<usize>,
     },
     /// Move moved message to target folder — undo moves it back.
     Move {
@@ -206,6 +210,7 @@ pub enum UndoAction {
         source_folder: String,
         target_folder: String,
         dest_id: Option<Vec<String>>,
+        dest_index: Option<usize>,
     },
     /// Toggled the Seen flag.
     ToggleRead {
@@ -254,7 +259,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(envelopes: Vec<EnvelopeData>, _folder: String) -> Self {
+    pub fn new(envelopes: Vec<EnvelopeData>) -> Self {
         Self {
             envelopes,
             sections: Vec::new(),
@@ -570,7 +575,7 @@ mod tests {
 
     #[test]
     fn new_app_defaults() {
-        let app = App::new(vec![], "INBOX".to_string());
+        let app = App::new(vec![]);
         assert_eq!(app.selected, 0);
         assert!(matches!(app.folder_context, FolderContext::AllInboxes));
         assert!(!app.should_quit);
@@ -580,7 +585,7 @@ mod tests {
     #[test]
     fn select_next_advances() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         assert_eq!(app.selected, 0);
         app.select_next();
         assert_eq!(app.selected, 1);
@@ -589,7 +594,7 @@ mod tests {
     #[test]
     fn select_next_clamps_at_end() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.select_next();
         app.select_next();
         app.select_next();
@@ -598,7 +603,7 @@ mod tests {
 
     #[test]
     fn select_next_empty_list() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.select_next();
         assert_eq!(app.selected, 0);
     }
@@ -606,7 +611,7 @@ mod tests {
     #[test]
     fn select_prev_decrements() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 1;
         app.select_prev();
         assert_eq!(app.selected, 0);
@@ -614,7 +619,7 @@ mod tests {
 
     #[test]
     fn select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![make_envelope("1", "a")], "INBOX".to_string());
+        let mut app = App::new(vec![make_envelope("1", "a")]);
         app.select_prev();
         assert_eq!(app.selected, 0);
     }
@@ -699,7 +704,7 @@ mod tests {
                 count: 1,
             },
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+        let mut app = App::new(envelopes).with_sections(sections);
 
         assert_eq!(app.selected, 0);
         app.select_next();
@@ -719,7 +724,7 @@ mod tests {
             make_envelope("2", "b"),
             make_envelope("3", "c"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 1;
         let removed = app.remove_envelope(1);
         assert_eq!(removed.unwrap().id, "2");
@@ -731,7 +736,7 @@ mod tests {
     #[test]
     fn remove_envelope_last_item() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 1;
         app.remove_envelope(1);
         assert_eq!(app.envelopes.len(), 1);
@@ -741,7 +746,7 @@ mod tests {
     #[test]
     fn remove_envelope_only_item() {
         let envelopes = vec![make_envelope("1", "a")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.remove_envelope(0);
         assert!(app.envelopes.is_empty());
         assert_eq!(app.selected, 0);
@@ -749,7 +754,7 @@ mod tests {
 
     #[test]
     fn remove_envelope_out_of_bounds() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         assert!(app.remove_envelope(0).is_none());
     }
 
@@ -773,7 +778,7 @@ mod tests {
                 count: 2,
             },
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+        let mut app = App::new(envelopes).with_sections(sections);
 
         // Remove from first section
         app.remove_envelope(0);
@@ -798,7 +803,7 @@ mod tests {
                 count: 1,
             },
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string()).with_sections(sections);
+        let mut app = App::new(envelopes).with_sections(sections);
 
         // Remove only item in first section
         app.remove_envelope(0);
@@ -823,7 +828,7 @@ mod tests {
 
     #[test]
     fn folder_select_next_advances() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(3, 0);
         app.folder_select_next();
         if let View::FolderList(state) = &app.view {
@@ -835,7 +840,7 @@ mod tests {
 
     #[test]
     fn folder_select_next_clamps_at_end() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(2, 1);
         app.folder_select_next();
         app.folder_select_next();
@@ -848,7 +853,7 @@ mod tests {
 
     #[test]
     fn folder_select_next_empty_list() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(0, 0);
         app.folder_select_next();
         if let View::FolderList(state) = &app.view {
@@ -860,7 +865,7 @@ mod tests {
 
     #[test]
     fn folder_select_prev_decrements() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(3, 2);
         app.folder_select_prev();
         if let View::FolderList(state) = &app.view {
@@ -872,7 +877,7 @@ mod tests {
 
     #[test]
     fn folder_select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_folder_list_view(3, 0);
         app.folder_select_prev();
         if let View::FolderList(state) = &app.view {
@@ -884,7 +889,7 @@ mod tests {
 
     #[test]
     fn folder_select_noop_on_wrong_view() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.folder_select_next();
         assert!(matches!(app.view, View::MessageList));
         app.folder_select_prev();
@@ -905,7 +910,7 @@ mod tests {
     #[test]
     fn start_search_initializes_all_indices() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         let search = app.search.as_ref().unwrap();
         assert_eq!(search.query, "");
@@ -920,7 +925,7 @@ mod tests {
             make_envelope("2", "goodbye"),
             make_envelope("3", "hello there"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         app.search_push_char('h');
         app.search_push_char('e');
@@ -937,7 +942,7 @@ mod tests {
             make_envelope("1", "hello world"),
             make_envelope("2", "goodbye"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         app.search_push_char('h');
         app.search_push_char('e');
@@ -955,7 +960,7 @@ mod tests {
             make_envelope("2", "beta"),
             make_envelope("3", "gamma"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         // Filter to just "beta" (index 1)
         app.search_push_char('b');
@@ -974,7 +979,7 @@ mod tests {
     #[test]
     fn confirm_search_empty_results_noop() {
         let envelopes = vec![make_envelope("1", "hello")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.selected = 0;
         app.start_search();
         app.search_push_char('z');
@@ -988,7 +993,7 @@ mod tests {
 
     #[test]
     fn cancel_search_clears_state() {
-        let mut app = App::new(vec![make_envelope("1", "a")], "INBOX".to_string());
+        let mut app = App::new(vec![make_envelope("1", "a")]);
         app.start_search();
         assert!(app.search.is_some());
         app.cancel_search();
@@ -1002,7 +1007,7 @@ mod tests {
             make_envelope("2", "ab"),
             make_envelope("3", "ac"),
         ];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.start_search();
         // All 3 matched
         assert_eq!(app.search.as_ref().unwrap().selected, 0);
@@ -1022,7 +1027,7 @@ mod tests {
 
     #[test]
     fn search_empty_list() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.start_search();
         let search = app.search.as_ref().unwrap();
         assert!(search.matched_indices.is_empty());
@@ -1054,7 +1059,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_next_advances() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0);
         app.folder_select_next();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1066,7 +1071,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_next_clamps() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(2, 1);
         app.folder_select_next();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1078,7 +1083,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_prev_decrements() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 2);
         app.folder_select_prev();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1090,7 +1095,7 @@ mod tests {
 
     #[test]
     fn move_picker_select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0);
         app.folder_select_prev();
         if let View::MoveFolderPicker(state) = &app.view {
@@ -1102,7 +1107,7 @@ mod tests {
 
     #[test]
     fn move_picker_search_filters_folders() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0); // folder0, folder1, folder2
         app.start_search();
         app.search_push_char('1'); // should match "folder1"
@@ -1113,7 +1118,7 @@ mod tests {
 
     #[test]
     fn move_picker_confirm_search_maps_selection() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_move_picker_view(3, 0);
         app.start_search();
         app.search_push_char('2'); // match folder2 at index 2
@@ -1138,7 +1143,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_next_advances() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0);
         app.folder_select_next();
         if let View::AccountPicker(state) = &app.view {
@@ -1150,7 +1155,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_next_clamps() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(2, 1);
         app.folder_select_next();
         if let View::AccountPicker(state) = &app.view {
@@ -1162,7 +1167,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_prev_decrements() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 2);
         app.folder_select_prev();
         if let View::AccountPicker(state) = &app.view {
@@ -1174,7 +1179,7 @@ mod tests {
 
     #[test]
     fn account_picker_select_prev_clamps_at_zero() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0);
         app.folder_select_prev();
         if let View::AccountPicker(state) = &app.view {
@@ -1186,7 +1191,7 @@ mod tests {
 
     #[test]
     fn account_picker_search_filters() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0); // account0, account1, account2
         app.start_search();
         app.search_push_char('1'); // should match "account1"
@@ -1197,7 +1202,7 @@ mod tests {
 
     #[test]
     fn account_picker_confirm_search_maps_selection() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.view = make_account_picker_view(3, 0);
         app.start_search();
         app.search_push_char('2'); // match account2 at index 2
@@ -1214,7 +1219,7 @@ mod tests {
     #[test]
     fn insert_envelope_basic() {
         let envelopes = vec![make_envelope("1", "a"), make_envelope("3", "c")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.sections = vec![AccountSection {
             name: String::new(),
             start: 0,
@@ -1230,7 +1235,7 @@ mod tests {
     #[test]
     fn insert_envelope_at_start() {
         let envelopes = vec![make_envelope("2", "b")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.sections = vec![AccountSection {
             name: String::new(),
             start: 0,
@@ -1245,7 +1250,7 @@ mod tests {
     #[test]
     fn insert_envelope_clamps_past_end() {
         let envelopes = vec![make_envelope("1", "a")];
-        let mut app = App::new(envelopes, "INBOX".to_string());
+        let mut app = App::new(envelopes);
         app.sections = vec![AccountSection {
             name: String::new(),
             start: 0,
@@ -1259,7 +1264,7 @@ mod tests {
 
     #[test]
     fn insert_envelope_into_empty() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.insert_envelope(0, make_envelope("1", "a"));
         assert_eq!(app.envelopes.len(), 1);
         assert_eq!(app.selected, 0);
@@ -1273,7 +1278,7 @@ mod tests {
         env1.account = "work".to_string();
         let mut env2 = make_envelope("2", "b");
         env2.account = "personal".to_string();
-        let mut app = App::new(vec![env1, env2], "INBOX".to_string());
+        let mut app = App::new(vec![env1, env2]);
         app.sections = vec![
             AccountSection {
                 name: "work".to_string(),
@@ -1301,7 +1306,7 @@ mod tests {
     fn insert_envelope_creates_new_section() {
         let mut env1 = make_envelope("1", "a");
         env1.account = "work".to_string();
-        let mut app = App::new(vec![env1], "INBOX".to_string());
+        let mut app = App::new(vec![env1]);
         app.sections = vec![AccountSection {
             name: "work".to_string(),
             start: 0,
@@ -1324,7 +1329,7 @@ mod tests {
         env2.account = "other".to_string();
         let mut env3 = make_envelope("3", "c");
         env3.account = "work".to_string();
-        let mut app = App::new(vec![env1, env2, env3], "INBOX".to_string());
+        let mut app = App::new(vec![env1, env2, env3]);
         app.sections = vec![
             AccountSection {
                 name: "other".to_string(),
@@ -1354,7 +1359,7 @@ mod tests {
 
     #[test]
     fn new_app_has_empty_undo_redo_stacks() {
-        let app = App::new(vec![], "INBOX".to_string());
+        let app = App::new(vec![]);
         assert!(app.undo_stack.is_empty());
         assert!(app.redo_stack.is_empty());
     }
@@ -1367,7 +1372,7 @@ mod tests {
         env2.account = "work".to_string();
         let mut env3 = make_envelope("3", "c");
         env3.account = "work".to_string();
-        let mut app = App::new(vec![env1, env2.clone(), env3], "INBOX".to_string());
+        let mut app = App::new(vec![env1, env2.clone(), env3]);
         app.sections = vec![AccountSection {
             name: "work".to_string(),
             start: 0,
@@ -1389,7 +1394,7 @@ mod tests {
 
     #[test]
     fn set_deferred_undo_clears_redo() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.redo_on_complete = true;
         app.set_deferred_undo();
         assert!(app.undo_on_complete);
@@ -1398,7 +1403,7 @@ mod tests {
 
     #[test]
     fn set_deferred_redo_clears_undo() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.undo_on_complete = true;
         app.set_deferred_redo();
         assert!(app.redo_on_complete);
@@ -1407,7 +1412,7 @@ mod tests {
 
     #[test]
     fn undo_stack_capped_at_limit() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         for i in 0..150 {
             app.undo_stack.push_back(UndoAction::ToggleRead {
                 envelope_id: i.to_string(),
@@ -1432,13 +1437,13 @@ mod tests {
 
     #[test]
     fn folder_display_name_all_inboxes() {
-        let app = App::new(vec![], "INBOX".to_string());
+        let app = App::new(vec![]);
         assert_eq!(app.folder_display_name(), "INBOX");
     }
 
     #[test]
     fn folder_display_name_single_folder() {
-        let mut app = App::new(vec![], "INBOX".to_string());
+        let mut app = App::new(vec![]);
         app.folder_context = FolderContext::SingleFolder {
             folder_name: "Sent".to_string(),
             account_key: "work".to_string(),
@@ -1454,7 +1459,7 @@ mod tests {
             start: 0,
             count: 2,
         }];
-        let mut app = App::new(envelopes.clone(), "INBOX".to_string());
+        let mut app = App::new(envelopes.clone());
         app.sections = sections.clone();
         app.selected = 1;
 

@@ -6,7 +6,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::app::{App, EnvelopeData, Status, View};
+use crate::tui::app::{
+    App, EnvelopeData, FolderContext, FolderEntry, FolderSection, SearchState, Status, View,
+};
 
 const FROM_COLOR: Color = Color::Cyan;
 const FLAGGED_COLOR: Color = Color::Yellow;
@@ -30,6 +32,36 @@ const ENVELOPE_WIDTHS: [Constraint; ENVELOPE_COL_COUNT] = [
     Constraint::Length(1),
     Constraint::Length(16),
 ];
+
+/// Extract search-aware visible indices and the search-selected position from app state.
+fn search_visible_indices(
+    search: &Option<SearchState>,
+    item_count: usize,
+) -> (bool, usize, Vec<usize>) {
+    match search.as_ref() {
+        Some(s) => (true, s.selected, s.matched_indices.clone()),
+        None => (false, 0, (0..item_count).collect()),
+    }
+}
+
+/// Compute which table row to highlight, given search state and visible indices.
+fn highlight_row(
+    searching: bool,
+    search_selected: usize,
+    visible_indices: &[usize],
+    selected: usize,
+    item_to_table_row: &[usize],
+) -> usize {
+    let pos = if searching {
+        search_selected
+    } else {
+        visible_indices
+            .iter()
+            .position(|&i| i == selected)
+            .unwrap_or(0)
+    };
+    item_to_table_row.get(pos).copied().unwrap_or(0)
+}
 
 /// Build a table header row for envelope lists.
 fn envelope_header() -> Row<'static> {
@@ -110,6 +142,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             let active_env = app.envelopes.get(app.selected);
             render_message(frame, content, *scroll, app, active_env)
         }
+        View::FolderList(state) => {
+            render_folder_list(frame, &state.folders, &state.sections, state.selected, app)
+        }
     }
 }
 
@@ -152,9 +187,21 @@ fn render_flag_legend(frame: &mut Frame, area: ratatui::layout::Rect) {
     );
 }
 
+fn render_search_bar(frame: &mut Frame, area: ratatui::layout::Rect, query: &str) {
+    let text = Line::from(vec![
+        Span::styled("/", Style::default().fg(Color::Yellow)),
+        Span::raw(query),
+        Span::styled("_", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(text), area);
+}
+
 /// Render the search-mode bottom bar. Returns `true` if handled (caller should
 /// skip normal bottom-bar rendering).
 fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) -> bool {
+    let Some(search) = &app.search else {
+        return false;
+    };
     if let Some(status) = &app.status {
         let (msg, color) = match status {
             Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
@@ -165,19 +212,35 @@ fn render_search_bottom(frame: &mut Frame, area: ratatui::layout::Rect, app: &Ap
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
         frame.render_widget(Paragraph::new(line), area);
-        return true;
+    } else {
+        render_search_bar(frame, area, &search.query);
     }
-    false
+    true
 }
 
 fn render_message_list(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
 
-    let mut rows: Vec<Row> = Vec::new();
-    let mut item_to_table_row: Vec<usize> = Vec::new();
+    let (searching, search_selected, vis) =
+        search_visible_indices(&app.search, app.envelopes.len());
+    let visible_set: std::collections::HashSet<usize> = vis.iter().copied().collect();
 
-    // Build section starts
-    let section_starts: std::collections::HashMap<usize, (&str, bool)> = {
+    // Build section starts for visible items only
+    let section_starts: std::collections::HashMap<usize, (&str, bool)> = if searching {
+        let mut map = std::collections::HashMap::new();
+        let mut first = true;
+        for section in &app.sections {
+            // Find first visible index in this section
+            let first_visible =
+                (section.start..section.start + section.count).find(|i| visible_set.contains(i));
+            if let Some(idx) = first_visible {
+                let is_first = first;
+                first = false;
+                map.insert(idx, (section.name.as_str(), is_first));
+            }
+        }
+        map
+    } else {
         let mut first = true;
         app.sections
             .iter()
@@ -190,7 +253,11 @@ fn render_message_list(frame: &mut Frame, app: &App) {
             .collect()
     };
 
-    for (i, e) in app.envelopes.iter().enumerate() {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut item_to_table_row: Vec<usize> = Vec::new();
+
+    for (pos, &i) in vis.iter().enumerate() {
+        let e = &app.envelopes[i];
         if let Some((account_name, is_first)) = section_starts.get(&i) {
             if !is_first {
                 rows.push(Row::new(
@@ -208,7 +275,11 @@ fn render_message_list(frame: &mut Frame, app: &App) {
         }
 
         item_to_table_row.push(rows.len());
-        let is_selected = i == app.selected;
+        let is_selected = if searching {
+            pos == search_selected
+        } else {
+            i == app.selected
+        };
         rows.push(envelope_row(e, is_selected));
     }
 
@@ -221,16 +292,13 @@ fn render_message_list(frame: &mut Frame, app: &App) {
                 .title(format!(" {} ", app.folder_display_name())),
         );
 
-    let table_selected = item_to_table_row
-        .get(
-            (0..app.envelopes.len())
-                .collect::<Vec<_>>()
-                .iter()
-                .position(|&i| i == app.selected)
-                .unwrap_or(0),
-        )
-        .copied()
-        .unwrap_or(0);
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &vis,
+        app.selected,
+        &item_to_table_row,
+    );
     let mut state = TableState::default().with_selected(Some(table_selected));
     frame.render_stateful_widget(table, chunks[0], &mut state);
 
@@ -239,26 +307,139 @@ fn render_message_list(frame: &mut Frame, app: &App) {
             Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
                 .split(chunks[1]);
 
-        let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
-        let status_line = Line::from(vec![
-            Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
-            Span::raw(": quit | "),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::raw(": navigate | "),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(": read | "),
-            Span::styled("r", Style::default().fg(Color::Yellow)),
-            Span::raw(read_label),
-            Span::styled("f", Style::default().fg(Color::Yellow)),
-            Span::raw(flag_label),
-            Span::raw(" | "),
-            Span::styled("d", Style::default().fg(Color::Yellow)),
-            Span::raw(": delete | "),
-            Span::styled("a", Style::default().fg(Color::Yellow)),
-            Span::raw(": archive"),
-        ]);
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            let (read_label, flag_label) = toggle_labels(app.envelopes.get(app.selected));
+            let quit_label = match &app.folder_context {
+                FolderContext::AllInboxes => ": quit | ",
+                FolderContext::SingleFolder { .. } => ": back | ",
+            };
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(quit_label),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": read | "),
+                Span::styled("r", Style::default().fg(Color::Yellow)),
+                Span::raw(read_label),
+                Span::styled("f", Style::default().fg(Color::Yellow)),
+                Span::raw(flag_label),
+                Span::raw(" | "),
+                Span::styled("d", Style::default().fg(Color::Yellow)),
+                Span::raw(": delete | "),
+                Span::styled("a", Style::default().fg(Color::Yellow)),
+                Span::raw(": archive | "),
+                Span::styled("\\", Style::default().fg(Color::Yellow)),
+                Span::raw(": folders | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
+        };
         frame.render_widget(Paragraph::new(status_line), chunks_bottom[0]);
         render_flag_legend(frame, chunks_bottom[1]);
+    }
+}
+
+fn render_folder_list(
+    frame: &mut Frame,
+    folders: &[FolderEntry],
+    sections: &[FolderSection],
+    selected: usize,
+    app: &App,
+) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+
+    let (searching, search_selected, vis) = search_visible_indices(&app.search, folders.len());
+    let visible_set: std::collections::HashSet<usize> = vis.iter().copied().collect();
+
+    let section_starts: std::collections::HashMap<usize, &str> = if searching {
+        let mut map = std::collections::HashMap::new();
+        for section in sections {
+            let first_visible =
+                (section.start..section.start + section.count).find(|i| visible_set.contains(i));
+            if let Some(idx) = first_visible {
+                map.insert(idx, section.name.as_str());
+            }
+        }
+        map
+    } else {
+        sections
+            .iter()
+            .filter(|s| s.count > 0)
+            .map(|s| (s.start, s.name.as_str()))
+            .collect()
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut folder_to_table_row: Vec<usize> = Vec::new();
+
+    for &i in vis.iter() {
+        let f = &folders[i];
+        if let Some(account_name) = section_starts.get(&i) {
+            rows.push(Row::new([Cell::from("")]));
+            let style = Style::default()
+                .fg(SECTION_HEADER_COLOR)
+                .add_modifier(Modifier::BOLD);
+            rows.push(Row::new([
+                Cell::from(format!("  {account_name}")).style(style)
+            ]));
+        }
+
+        folder_to_table_row.push(rows.len());
+        rows.push(Row::new([Cell::from(format!("  {}", f.name))]));
+    }
+
+    let table = Table::new(rows, [Constraint::Percentage(100)])
+        .column_spacing(0)
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Select Folder "),
+        );
+
+    let table_selected = highlight_row(
+        searching,
+        search_selected,
+        &vis,
+        selected,
+        &folder_to_table_row,
+    );
+    let mut state = TableState::default().with_selected(Some(table_selected));
+    frame.render_stateful_widget(table, chunks[0], &mut state);
+
+    if !render_search_bottom(frame, chunks[1], app) {
+        let status_line = if let Some(status) = &app.status {
+            let (msg, color) = match status {
+                Status::Info(msg) | Status::Working(msg) => (msg.as_str(), Color::Yellow),
+                Status::Error(msg) => (msg.as_str(), Color::Red),
+            };
+            Line::from(Span::styled(
+                format!(" {msg}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(vec![
+                Span::styled(" Esc/q", Style::default().fg(Color::Yellow)),
+                Span::raw(": back | "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(": navigate | "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(": select folder | "),
+                Span::styled("/", Style::default().fg(Color::Yellow)),
+                Span::raw(": search"),
+            ])
+        };
+        frame.render_widget(Paragraph::new(status_line), chunks[1]);
     }
 }
 

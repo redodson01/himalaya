@@ -1,3 +1,5 @@
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config as MatcherConfig, Matcher, Utf32Str};
 use pimalaya_tui::himalaya::config::Envelope;
 
 /// Sort order for flag characters: Seen, Flagged, Answered, Deleted, Draft.
@@ -20,6 +22,7 @@ pub fn sort_flags(flags: &str) -> String {
 }
 
 /// Owned envelope data extracted from pimalaya_tui's Envelope type.
+#[derive(Clone)]
 pub struct EnvelopeData {
     pub id: String,
     pub subject: String,
@@ -32,6 +35,7 @@ pub struct EnvelopeData {
 }
 
 /// Tracks a contiguous range of envelopes belonging to one account.
+#[derive(Clone)]
 pub struct AccountSection {
     pub name: String,
     pub start: usize,
@@ -79,9 +83,54 @@ impl From<&Envelope> for EnvelopeData {
     }
 }
 
+pub struct FolderEntry {
+    pub name: String,
+    pub account: String,
+}
+
+pub struct FolderSection {
+    pub name: String,
+    pub start: usize,
+    pub count: usize,
+}
+
+pub struct SearchState {
+    pub query: String,
+    pub matched_indices: Vec<usize>,
+    pub selected: usize,
+}
+
+/// Which folder context is currently being viewed.
+#[derive(Clone)]
+pub enum FolderContext {
+    /// Multi-account "all inboxes" virtual folder.
+    AllInboxes,
+    /// Single folder for a specific account.
+    SingleFolder {
+        folder_name: String,
+        account_key: String,
+    },
+}
+
+/// Saved state when navigating away from a message list (e.g. to folder list).
+#[derive(Clone)]
+pub struct SavedListState {
+    pub folder_context: FolderContext,
+    pub envelopes: Vec<EnvelopeData>,
+    pub sections: Vec<AccountSection>,
+    pub selected: usize,
+}
+
+pub struct FolderListState {
+    pub folders: Vec<FolderEntry>,
+    pub sections: Vec<FolderSection>,
+    pub selected: usize,
+}
+
 pub enum View {
     MessageList,
     MessageRead { content: String, scroll: u16 },
+    FolderList(FolderListState),
 }
 
 pub enum Status {
@@ -95,8 +144,11 @@ pub struct App {
     pub sections: Vec<AccountSection>,
     pub selected: usize,
     pub view: View,
+    pub folder_context: FolderContext,
+    pub saved_list_state: Option<SavedListState>,
     pub should_quit: bool,
     pub status: Option<Status>,
+    pub search: Option<SearchState>,
 }
 
 impl App {
@@ -106,14 +158,20 @@ impl App {
             sections: Vec::new(),
             selected: 0,
             view: View::MessageList,
+            folder_context: FolderContext::AllInboxes,
+            saved_list_state: None,
             should_quit: false,
             status: None,
+            search: None,
         }
     }
 
     /// Display name for the current folder context.
     pub fn folder_display_name(&self) -> String {
-        "INBOX".to_string()
+        match &self.folder_context {
+            FolderContext::AllInboxes => "INBOX".to_string(),
+            FolderContext::SingleFolder { folder_name, .. } => folder_name.clone(),
+        }
     }
 
     pub fn with_sections(mut self, sections: Vec<AccountSection>) -> Self {
@@ -129,6 +187,20 @@ impl App {
 
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn folder_select_next(&mut self) {
+        if let View::FolderList(state) = &mut self.view {
+            if !state.folders.is_empty() {
+                state.selected = (state.selected + 1).min(state.folders.len() - 1);
+            }
+        }
+    }
+
+    pub fn folder_select_prev(&mut self) {
+        if let View::FolderList(state) = &mut self.view {
+            state.selected = state.selected.saturating_sub(1);
+        }
     }
 
     /// Remove the envelope at the given index, updating sections accordingly.
@@ -166,6 +238,124 @@ impl App {
 
         Some(removed)
     }
+
+    pub fn start_search(&mut self) {
+        let item_count = match &self.view {
+            View::MessageList => self.envelopes.len(),
+            View::FolderList(state) => state.folders.len(),
+            View::MessageRead { .. } => return, // no-op
+        };
+        self.search = Some(SearchState {
+            query: String::new(),
+            matched_indices: (0..item_count).collect(),
+            selected: 0,
+        });
+    }
+
+    pub fn cancel_search(&mut self) {
+        self.search = None;
+    }
+
+    /// Confirms search, maps selection back, returns `true` if a valid item was selected.
+    /// Note: search state is kept alive so the filtered view persists during loading.
+    /// Callers should call `cancel_search()` after the follow-up action completes.
+    pub fn confirm_search(&mut self) -> bool {
+        let Some(search) = &self.search else {
+            return false;
+        };
+        if search.matched_indices.is_empty() {
+            self.search = None;
+            return false;
+        }
+        let original_index = search.matched_indices[search.selected];
+        match &mut self.view {
+            View::MessageList => self.selected = original_index,
+            View::FolderList(state) => state.selected = original_index,
+            View::MessageRead { .. } => {}
+        }
+        true
+    }
+
+    pub fn search_push_char(&mut self, c: char) {
+        if let Some(search) = &mut self.search {
+            search.query.push(c);
+            self.recompute_search_matches();
+        }
+    }
+
+    pub fn search_pop_char(&mut self) {
+        if let Some(search) = &mut self.search {
+            search.query.pop();
+            self.recompute_search_matches();
+        }
+    }
+
+    pub fn search_select_next(&mut self) {
+        if let Some(search) = &mut self.search {
+            if !search.matched_indices.is_empty() {
+                search.selected = (search.selected + 1).min(search.matched_indices.len() - 1);
+            }
+        }
+    }
+
+    pub fn search_select_prev(&mut self) {
+        if let Some(search) = &mut self.search {
+            search.selected = search.selected.saturating_sub(1);
+        }
+    }
+
+    fn recompute_search_matches(&mut self) {
+        let search = match &mut self.search {
+            Some(s) => s,
+            None => return,
+        };
+
+        if search.query.is_empty() {
+            let len = match &self.view {
+                View::MessageList => self.envelopes.len(),
+                View::FolderList(state) => state.folders.len(),
+                View::MessageRead { .. } => 0,
+            };
+            search.matched_indices = (0..len).collect();
+            search.selected = search
+                .selected
+                .min(search.matched_indices.len().saturating_sub(1));
+            return;
+        }
+
+        let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
+        let pattern = Pattern::new(
+            &search.query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
+
+        let searchable_texts: Vec<String> = match &self.view {
+            View::MessageList => self
+                .envelopes
+                .iter()
+                .map(|e| format!("{} {}", e.subject, e.from))
+                .collect(),
+            View::FolderList(state) => state.folders.iter().map(|f| f.name.clone()).collect(),
+            View::MessageRead { .. } => Vec::new(),
+        };
+
+        let mut buf = Vec::new();
+        search.matched_indices = searchable_texts
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| {
+                let haystack = Utf32Str::new(text, &mut buf);
+                pattern.score(haystack, &mut matcher).is_some()
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        search.selected = search
+            .selected
+            .min(search.matched_indices.len().saturating_sub(1));
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +379,7 @@ mod tests {
     fn new_app_defaults() {
         let app = App::new(vec![]);
         assert_eq!(app.selected, 0);
+        assert!(matches!(app.folder_context, FolderContext::AllInboxes));
         assert!(!app.should_quit);
         assert!(matches!(app.view, View::MessageList));
     }
@@ -421,6 +612,90 @@ mod tests {
         assert_eq!(app.sections[0].start, 0);
     }
 
+    fn make_folder_list_view(count: usize, selected: usize) -> View {
+        let folders = (0..count)
+            .map(|i| FolderEntry {
+                name: format!("folder{i}"),
+                account: String::new(),
+            })
+            .collect();
+        View::FolderList(FolderListState {
+            folders,
+            sections: Vec::new(),
+            selected,
+        })
+    }
+
+    #[test]
+    fn folder_select_next_advances() {
+        let mut app = App::new(vec![]);
+        app.view = make_folder_list_view(3, 0);
+        app.folder_select_next();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_next_clamps_at_end() {
+        let mut app = App::new(vec![]);
+        app.view = make_folder_list_view(2, 1);
+        app.folder_select_next();
+        app.folder_select_next();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_next_empty_list() {
+        let mut app = App::new(vec![]);
+        app.view = make_folder_list_view(0, 0);
+        app.folder_select_next();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_prev_decrements() {
+        let mut app = App::new(vec![]);
+        app.view = make_folder_list_view(3, 2);
+        app.folder_select_prev();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 1);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_prev_clamps_at_zero() {
+        let mut app = App::new(vec![]);
+        app.view = make_folder_list_view(3, 0);
+        app.folder_select_prev();
+        if let View::FolderList(state) = &app.view {
+            assert_eq!(state.selected, 0);
+        } else {
+            panic!("expected FolderList view");
+        }
+    }
+
+    #[test]
+    fn folder_select_noop_on_wrong_view() {
+        let mut app = App::new(vec![]);
+        app.folder_select_next();
+        assert!(matches!(app.view, View::MessageList));
+        app.folder_select_prev();
+        assert!(matches!(app.view, View::MessageList));
+    }
+
     #[test]
     fn sort_flags_sfadt_order() {
         assert_eq!(sort_flags("FS"), "SF");
@@ -428,5 +703,138 @@ mod tests {
         assert_eq!(sort_flags("S"), "S");
         assert_eq!(sort_flags(""), "");
         assert_eq!(sort_flags("*F"), "F*");
+    }
+
+    // --- Search tests ---
+
+    #[test]
+    fn start_search_initializes_all_indices() {
+        let envelopes = vec![make_envelope("1", "a"), make_envelope("2", "b")];
+        let mut app = App::new(envelopes);
+        app.start_search();
+        let search = app.search.as_ref().unwrap();
+        assert_eq!(search.query, "");
+        assert_eq!(search.matched_indices, vec![0, 1]);
+        assert_eq!(search.selected, 0);
+    }
+
+    #[test]
+    fn search_push_char_filters() {
+        let envelopes = vec![
+            make_envelope("1", "hello world"),
+            make_envelope("2", "goodbye"),
+            make_envelope("3", "hello there"),
+        ];
+        let mut app = App::new(envelopes);
+        app.start_search();
+        app.search_push_char('h');
+        app.search_push_char('e');
+        app.search_push_char('l');
+        let search = app.search.as_ref().unwrap();
+        assert!(search.matched_indices.contains(&0));
+        assert!(search.matched_indices.contains(&2));
+        assert!(!search.matched_indices.contains(&1));
+    }
+
+    #[test]
+    fn search_pop_char_widens() {
+        let envelopes = vec![
+            make_envelope("1", "hello world"),
+            make_envelope("2", "goodbye"),
+        ];
+        let mut app = App::new(envelopes);
+        app.start_search();
+        app.search_push_char('h');
+        app.search_push_char('e');
+        assert_eq!(app.search.as_ref().unwrap().matched_indices.len(), 1);
+        app.search_pop_char();
+        app.search_pop_char();
+        // empty query shows all
+        assert_eq!(app.search.as_ref().unwrap().matched_indices.len(), 2);
+    }
+
+    #[test]
+    fn confirm_search_maps_selection() {
+        let envelopes = vec![
+            make_envelope("1", "alpha"),
+            make_envelope("2", "beta"),
+            make_envelope("3", "gamma"),
+        ];
+        let mut app = App::new(envelopes);
+        app.start_search();
+        // Filter to just "beta" (index 1)
+        app.search_push_char('b');
+        app.search_push_char('e');
+        app.search_push_char('t');
+        let search = app.search.as_ref().unwrap();
+        assert_eq!(search.matched_indices, vec![1]);
+        assert_eq!(search.selected, 0);
+        assert!(app.confirm_search());
+        assert!(app.search.is_some()); // search stays active for loading draw
+        assert_eq!(app.selected, 1);
+        app.cancel_search(); // caller clears
+        assert!(app.search.is_none());
+    }
+
+    #[test]
+    fn confirm_search_empty_results_noop() {
+        let envelopes = vec![make_envelope("1", "hello")];
+        let mut app = App::new(envelopes);
+        app.selected = 0;
+        app.start_search();
+        app.search_push_char('z');
+        app.search_push_char('z');
+        app.search_push_char('z');
+        assert!(app.search.as_ref().unwrap().matched_indices.is_empty());
+        assert!(!app.confirm_search());
+        assert!(app.search.is_none()); // cleared on empty results
+        assert_eq!(app.selected, 0); // unchanged
+    }
+
+    #[test]
+    fn cancel_search_clears_state() {
+        let mut app = App::new(vec![make_envelope("1", "a")]);
+        app.start_search();
+        assert!(app.search.is_some());
+        app.cancel_search();
+        assert!(app.search.is_none());
+    }
+
+    #[test]
+    fn search_select_next_prev() {
+        let envelopes = vec![
+            make_envelope("1", "aa"),
+            make_envelope("2", "ab"),
+            make_envelope("3", "ac"),
+        ];
+        let mut app = App::new(envelopes);
+        app.start_search();
+        // All 3 matched
+        assert_eq!(app.search.as_ref().unwrap().selected, 0);
+        app.search_select_next();
+        assert_eq!(app.search.as_ref().unwrap().selected, 1);
+        app.search_select_next();
+        assert_eq!(app.search.as_ref().unwrap().selected, 2);
+        app.search_select_next(); // clamp
+        assert_eq!(app.search.as_ref().unwrap().selected, 2);
+        app.search_select_prev();
+        assert_eq!(app.search.as_ref().unwrap().selected, 1);
+        app.search_select_prev();
+        assert_eq!(app.search.as_ref().unwrap().selected, 0);
+        app.search_select_prev(); // clamp
+        assert_eq!(app.search.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn search_empty_list() {
+        let mut app = App::new(vec![]);
+        app.start_search();
+        let search = app.search.as_ref().unwrap();
+        assert!(search.matched_indices.is_empty());
+        assert_eq!(search.selected, 0);
+        // Shouldn't panic
+        app.search_select_next();
+        app.search_select_prev();
+        app.confirm_search();
     }
 }

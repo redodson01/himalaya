@@ -245,6 +245,10 @@ async fn run_all_accounts(config: TomlConfig) -> Result<()> {
         }
     }
 
+    if backends.is_empty() {
+        color_eyre::eyre::bail!("no accounts loaded successfully; cannot start TUI");
+    }
+
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
 
@@ -1022,12 +1026,20 @@ async fn run_event_loop(
                         app.view = View::MessageRead { content, scroll: 0 };
                         terminal.draw(|frame| ui::render(frame, app))?;
 
-                        // Mark as read on server in background
+                        // Mark as read on server (best-effort; log failures)
                         if ctx.unseen {
                             if let Some(ab) = backends.get(&ctx.account_key) {
                                 if let Ok(id) = ctx.id.parse::<usize>() {
                                     let seen = Flags::from_iter([Flag::Seen]);
-                                    let _ = ab.backend.add_flags(&ctx.folder, &[id], &seen).await;
+                                    if let Err(e) =
+                                        ab.backend.add_flags(&ctx.folder, &[id], &seen).await
+                                    {
+                                        tracing::warn!(
+                                            account = ctx.account_key,
+                                            id,
+                                            "failed to mark message as read on server: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1288,7 +1300,6 @@ async fn run_event_loop(
                     if let Some(ctx) = active_envelope_context(app, default_account) {
                         let (id_str, account_key, source_folder) =
                             (ctx.id.clone(), ctx.account_key.clone(), ctx.folder.clone());
-                        let env_index = app.selected;
 
                         app.status = Some(Status::Working("Loading folders…".to_string()));
                         terminal.draw(|frame| ui::render(frame, app))?;
@@ -1312,7 +1323,6 @@ async fn run_event_loop(
                                         folders,
                                         selected: 0,
                                         source_envelope_id: id_str,
-                                        source_envelope_index: env_index,
                                         source_folder,
                                         account_key,
                                     });
@@ -1332,11 +1342,15 @@ async fn run_event_loop(
                             let id_str = state.source_envelope_id.clone();
                             let account_key = state.account_key.clone();
                             // Look up by ID in case the list changed since the picker opened.
-                            let envelope_index = app
-                                .envelopes
-                                .iter()
-                                .position(|e| e.id == id_str)
-                                .unwrap_or(state.source_envelope_index);
+                            let Some(envelope_index) =
+                                app.envelopes.iter().position(|e| e.id == id_str)
+                            else {
+                                app.view = View::MessageList;
+                                app.status = Some(Status::Error(
+                                    "Envelope no longer in list; move aborted".to_string(),
+                                ));
+                                break;
+                            };
                             execute_message_op(
                                 app,
                                 terminal,

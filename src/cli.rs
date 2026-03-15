@@ -244,6 +244,7 @@ impl HimalayaCommand {
         let mut account_names: Vec<&String> = config.accounts.keys().collect();
         account_names.sort();
 
+        let mut had_error = false;
         for name in &account_names {
             println!("--- {} ---", name);
             let result = match &listing {
@@ -265,7 +266,12 @@ impl HimalayaCommand {
             };
             if let Err(e) = result {
                 eprintln!("Error for account {}: {}", name, e);
+                had_error = true;
             }
+        }
+
+        if had_error {
+            color_eyre::eyre::bail!("one or more accounts failed");
         }
 
         Ok(())

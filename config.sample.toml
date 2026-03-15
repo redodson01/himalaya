@@ -249,7 +249,7 @@ template.new.signature-style = "inlined"
 template.reply.posting-style = "top"
 
 # Defines how and where the signature should be displayed when
-# repyling to a message.
+# replying to a message.
 #
 #template.reply.signature-style = "hidden"
 #template.reply.signature-style = "attached"

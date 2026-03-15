@@ -131,7 +131,6 @@ pub struct MoveFolderPickerState {
     pub folders: Vec<FolderEntry>,
     pub selected: usize,
     pub source_envelope_id: String,
-    pub source_envelope_index: usize,
     pub source_folder: String,
     pub account_key: String,
 }
@@ -900,7 +899,6 @@ mod tests {
             folders,
             selected,
             source_envelope_id: "1".to_string(),
-            source_envelope_index: 0,
             source_folder: "INBOX".to_string(),
             account_key: String::new(),
         })

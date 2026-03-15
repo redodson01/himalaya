@@ -873,6 +873,57 @@ async fn handle_edit_message(
     Ok(())
 }
 
+async fn fetch_folder_list(
+    backends: &BackendMap,
+    account_filter: Option<&str>,
+    exclude_folder: Option<&str>,
+) -> Result<(Vec<FolderEntry>, Vec<FolderSection>), String> {
+    let mut folders = Vec::new();
+    let mut sections = Vec::new();
+
+    let keys: Vec<String> = match account_filter {
+        Some(key) => vec![key.to_string()],
+        None => {
+            let mut keys: Vec<String> = backends.keys().cloned().collect();
+            keys.sort();
+            keys
+        }
+    };
+
+    for key in &keys {
+        if let Some(ab) = backends.get(key) {
+            match ab.backend.list_folders().await {
+                Ok(account_folders) => {
+                    let start = folders.len();
+                    let account_folders: Vec<email::folder::Folder> = account_folders.into();
+                    let mut count = 0;
+                    for f in account_folders {
+                        if exclude_folder.is_none_or(|ex| f.name != ex) {
+                            folders.push(FolderEntry {
+                                name: f.name,
+                                account: key.clone(),
+                            });
+                            count += 1;
+                        }
+                    }
+                    if count > 0 {
+                        sections.push(FolderSection {
+                            name: key.clone(),
+                            start,
+                            count,
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Error loading folders for {key}: {e}"));
+                }
+            }
+        }
+    }
+
+    Ok((folders, sections))
+}
+
 async fn run_event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -1072,49 +1123,18 @@ async fn run_event_loop(
                     });
                     app.search = None;
 
-                    let mut folders = Vec::new();
-                    let mut sections = Vec::new();
-                    let mut error: Option<String> = None;
-
-                    let mut keys: Vec<String> = backends.keys().cloned().collect();
-                    keys.sort();
-                    for key in &keys {
-                        if let Some(ab) = backends.get(key) {
-                            match ab.backend.list_folders().await {
-                                Ok(account_folders) => {
-                                    let start = folders.len();
-                                    let account_folders: Vec<email::folder::Folder> =
-                                        account_folders.into();
-                                    let count = account_folders.len();
-                                    for f in account_folders {
-                                        folders.push(FolderEntry {
-                                            name: f.name,
-                                            account: key.clone(),
-                                        });
-                                    }
-                                    sections.push(FolderSection {
-                                        name: key.clone(),
-                                        start,
-                                        count,
-                                    });
-                                }
-                                Err(e) => {
-                                    error = Some(format!("Error loading folders for {key}: {e}"));
-                                    break;
-                                }
-                            }
+                    match fetch_folder_list(backends, None, None).await {
+                        Ok((folders, sections)) => {
+                            app.status = None;
+                            app.view = View::FolderList(FolderListState {
+                                folders,
+                                sections,
+                                selected: 0,
+                            });
                         }
-                    }
-
-                    if let Some(err) = error {
-                        app.status = Some(Status::Error(err));
-                    } else {
-                        app.status = None;
-                        app.view = View::FolderList(FolderListState {
-                            folders,
-                            sections,
-                            selected: 0,
-                        });
+                        Err(err) => {
+                            app.status = Some(Status::Error(err));
+                        }
                     }
                 }
                 Action::FolderSelectNext => {
@@ -1273,49 +1293,34 @@ async fn run_event_loop(
                         app.status = Some(Status::Working("Loading folders…".to_string()));
                         terminal.draw(|frame| ui::render(frame, app))?;
 
-                        let mut folders = Vec::new();
-                        let mut error: Option<String> = None;
-
-                        if let Some(ab) = backends.get(&account_key) {
-                            match ab.backend.list_folders().await {
-                                Ok(account_folders) => {
-                                    let account_folders: Vec<email::folder::Folder> =
-                                        account_folders.into();
-                                    for f in account_folders {
-                                        if f.name != source_folder {
-                                            folders.push(FolderEntry {
-                                                name: f.name,
-                                                account: account_key.clone(),
-                                            });
-                                        }
+                        match fetch_folder_list(backends, Some(&account_key), Some(&source_folder))
+                            .await
+                        {
+                            Ok((folders, _sections)) => {
+                                if folders.is_empty() {
+                                    app.status = Some(Status::Error(
+                                        "No other folders available".to_string(),
+                                    ));
+                                } else {
+                                    app.status = None;
+                                    // If in MessageRead, go back to list first
+                                    if matches!(app.view, View::MessageRead { .. }) {
+                                        app.view = View::MessageList;
                                     }
-                                }
-                                Err(e) => {
-                                    error = Some(format!("Error loading folders: {e}"));
+
+                                    app.view = View::MoveFolderPicker(MoveFolderPickerState {
+                                        folders,
+                                        selected: 0,
+                                        source_envelope_id: id_str,
+                                        source_envelope_index: env_index,
+                                        source_folder,
+                                        account_key,
+                                    });
                                 }
                             }
-                        }
-
-                        if let Some(err) = error {
-                            app.status = Some(Status::Error(err));
-                        } else if folders.is_empty() {
-                            app.status =
-                                Some(Status::Error("No other folders available".to_string()));
-                        } else {
-                            app.status = None;
-                            // If in MessageRead, go back to list first
-                            if matches!(app.view, View::MessageRead { .. }) {
-                                app.view = View::MessageList;
+                            Err(err) => {
+                                app.status = Some(Status::Error(err));
                             }
-
-                            app.view = View::MoveFolderPicker(MoveFolderPickerState {
-                                folders,
-                                selected: 0,
-                                source_envelope_id: id_str,
-                                source_envelope_index: env_index,
-                                source_folder,
-                                account_key,
-                            });
                         }
                     }
                 }

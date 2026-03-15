@@ -658,6 +658,37 @@ async fn build_compose_backend(
     .await
 }
 
+async fn run_editor_flow(
+    terminal: &mut ratatui::DefaultTerminal,
+    toml_account_config: &Arc<crate::account::config::TomlAccountConfig>,
+    account_config: &Arc<email::account::config::AccountConfig>,
+    tpl: email::template::Template,
+) -> Result<()> {
+    let compose_backend = build_compose_backend(toml_account_config, account_config).await?;
+
+    if std::env::var("EDITOR").is_err() {
+        // SAFETY: Called while the TUI event loop is paused (single
+        // thread of control). The `unused_unsafe` allow keeps this
+        // compiling on edition 2021 while being forward-compatible
+        // with edition 2024 where `set_var` becomes unsafe.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("EDITOR", "vi");
+        }
+    }
+
+    ratatui::restore();
+
+    let mut printer = StdoutPrinter::default();
+    let result =
+        editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
+            .await;
+
+    *terminal = ratatui::init();
+
+    result
+}
+
 async fn handle_compose(
     app: &mut App,
     terminal: &mut ratatui::DefaultTerminal,
@@ -712,16 +743,6 @@ async fn handle_compose(
     app.status = Some(Status::Working(status_msg.to_string()));
     terminal.draw(|frame| ui::render(frame, app))?;
 
-    // Build a send-capable backend
-    let compose_backend =
-        match build_compose_backend(&ab.toml_account_config, &ab.account_config).await {
-            Ok(b) => b,
-            Err(e) => {
-                app.status = Some(Status::Error(format!("Compose setup failed: {e}")));
-                return Ok(());
-            }
-        };
-
     // Build the template
     let tpl = match kind {
         ComposeKind::New => {
@@ -760,34 +781,7 @@ async fn handle_compose(
         }
     };
 
-    if std::env::var("EDITOR").is_err() {
-        // SAFETY: Called while the TUI event loop is paused (single
-        // thread of control). The `unused_unsafe` allow keeps this
-        // compiling on edition 2021 while being forward-compatible
-        // with edition 2024 where `set_var` becomes unsafe.
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("EDITOR", "vi");
-        }
-    }
-
-    // Suspend TUI
-    ratatui::restore();
-
-    // Run editor flow
-    let mut printer = StdoutPrinter::default();
-    let editor_result = editor::edit_tpl_with_editor(
-        ab.account_config.clone(),
-        &mut printer,
-        &compose_backend,
-        tpl,
-    )
-    .await;
-
-    // Restore TUI
-    *terminal = ratatui::init();
-
-    match editor_result {
+    match run_editor_flow(terminal, &ab.toml_account_config, &ab.account_config, tpl).await {
         Ok(()) => {
             // For reply/reply-all, add Answered flag
             if matches!(kind, ComposeKind::Reply | ComposeKind::ReplyAll) {
@@ -864,44 +858,7 @@ async fn handle_edit_message(
         }
     };
 
-    // Build a send-capable backend
-    let compose_backend =
-        match build_compose_backend(&ab.toml_account_config, &ab.account_config).await {
-            Ok(b) => b,
-            Err(e) => {
-                app.status = Some(Status::Error(format!("Compose setup failed: {e}")));
-                return Ok(());
-            }
-        };
-
-    if std::env::var("EDITOR").is_err() {
-        // SAFETY: Called while the TUI event loop is paused (single
-        // thread of control). The `unused_unsafe` allow keeps this
-        // compiling on edition 2021 while being forward-compatible
-        // with edition 2024 where `set_var` becomes unsafe.
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("EDITOR", "vi");
-        }
-    }
-
-    // Suspend TUI
-    ratatui::restore();
-
-    // Run editor flow
-    let mut printer = StdoutPrinter::default();
-    let editor_result = editor::edit_tpl_with_editor(
-        ab.account_config.clone(),
-        &mut printer,
-        &compose_backend,
-        tpl,
-    )
-    .await;
-
-    // Restore TUI
-    *terminal = ratatui::init();
-
-    match editor_result {
+    match run_editor_flow(terminal, &ab.toml_account_config, &ab.account_config, tpl).await {
         Ok(()) => {
             if is_draft {
                 let _ = ab.backend.delete_messages(&folder, &[id]).await;

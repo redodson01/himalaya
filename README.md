@@ -34,6 +34,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
   - [Outlook](#outlook)
   - [iCloud Mail](#icloud-mail)
 - [Interfaces](#interfaces)
+- [TUI Key Bindings](#tui-key-bindings)
 - [FAQ](#faq)
 - [Testing](#testing)
 - [Social](#social)
@@ -52,6 +53,8 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
 - **Sendmail** backend (requires `sendmail` feature)
 - Global system **keyring** for secret management (requires `keyring` feature)
 - **OAuth 2.0** authorization flow (requires `oauth2` feature)
+- **Interactive TUI** mode via `--tui` (or `HIMALAYA_TUI=1`): browse envelopes and read messages in a full-screen terminal interface using [ratatui](https://ratatui.rs). Use with `-a <NAME>` to target a specific account
+- **All-accounts mode** via `--all` (or `HIMALAYA_ALL=1`): run listing commands (`envelope list`, `envelope thread`, `folder list`) across all configured accounts at once, with per-account headers. Also works with `--tui` to show stacked account sections
 - **JSON** output via `--output json`
 - **PGP** encryption:
   - via shell commands (requires `pgp-commands` feature)
@@ -521,6 +524,80 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 - [openclaw/openclaw](https://github.com/openclaw/openclaw/blob/main/skills/himalaya/SKILL.md): OpenClaw SKILL
 - [parisni/dfzf](https://github.com/parisni/dfzf): dfzf integration
 
+## TUI Key Bindings
+
+The interactive TUI mode (`--tui`) supports the following key bindings:
+
+### Message list (all inboxes / single folder)
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Quit (all inboxes) or back to previous view (single folder) |
+| `j` / `Down` | Select next envelope |
+| `k` / `Up` | Select previous envelope |
+| `Enter` | Read selected message |
+| `r` | Toggle read/unread |
+| `f` | Toggle flagged |
+| `d` | Delete message |
+| `a` | Archive message |
+| `m` | Move message to folder |
+| `E` | Edit message (delete draft on send) |
+| `N` | Compose new message (account picker in multi-account mode) |
+| `R` | Reply to message |
+| `A` | Reply all |
+| `F` | Forward message |
+| `\` | Open folder list |
+| `/` | Search / filter list |
+
+### Folder list
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Back to message list |
+| `j` / `Down` | Select next folder |
+| `k` / `Up` | Select previous folder |
+| `Enter` | Open selected folder |
+| `/` | Search / filter list |
+
+### Message view
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Back to envelope list |
+| `j` / `Down` | Scroll down |
+| `k` / `Up` | Scroll up |
+| `n` | Open next message |
+| `r` | Toggle read/unread |
+| `f` | Toggle flagged |
+| `d` | Delete message |
+| `a` | Archive message |
+| `m` | Move message to folder |
+| `E` | Edit message (delete draft on send) |
+| `N` | Compose new message (account picker in multi-account mode) |
+| `R` | Reply to message |
+| `A` | Reply all |
+| `F` | Forward message |
+
+### Move folder picker
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Cancel and go back |
+| `j` / `Down` | Select next folder |
+| `k` / `Up` | Select previous folder |
+| `Enter` | Move message to selected folder |
+| `/` | Search / filter list |
+
+### Account picker (multi-account compose)
+
+| Key | Action |
+|-----|--------|
+| `Esc` / `q` | Cancel and go back |
+| `j` / `Down` | Select next account |
+| `k` / `Up` | Select previous account |
+| `Enter` | Compose from selected account |
+| `/` | Search / filter list |
+
 ## FAQ
 
 <details>
@@ -528,7 +605,7 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 
   Aerc, mutt and alpine can be categorized as Terminal User Interfaces (TUI). When the program is executed, your terminal is locked into an event loop and you interact with your emails using keybinds.
 
-  Himalaya is also a TUI, but more specifically a Command-Line Interface (CLI). There is no event loop: you interact with your emails using shell commands, in a stateless way.
+  Himalaya started as a pure CLI (no event loop, stateless shell commands). It now also offers an optional interactive TUI mode (`--tui`) for browsing envelopes and reading messages in a full-screen interface, while retaining all the CLI capabilities.
 
   Additionaly, Himalaya CLI is based on `email-lib`, which is also part of the Pimalaya project. The aim is not just to propose a new terminal interface, but also to expose Rust tools to deal with emails. Anyone who knows Rust language can build his own email interface, without re-inventing the wheel.
 </details>

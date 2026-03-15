@@ -21,7 +21,7 @@ use crate::{
 ///
 /// This command allows you to thread envelopes included in the given
 /// folder, matching the given query.
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 pub struct EnvelopeThreadCommand {
     #[command(flatten)]
     pub folder: FolderNameOptionalFlag,

@@ -25,6 +25,13 @@ pub enum EnvelopeSubcommand {
 }
 
 impl EnvelopeSubcommand {
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::List(cmd) => cmd.account.name = Some(name),
+            Self::Thread(cmd) => cmd.account.name = Some(name),
+        }
+    }
+
     #[allow(unused)]
     pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         match self {

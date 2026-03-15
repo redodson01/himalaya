@@ -31,6 +31,14 @@ pub enum FlagSubcommand {
 }
 
 impl FlagSubcommand {
+    pub fn set_account(&mut self, name: String) {
+        match self {
+            Self::Add(cmd) => cmd.account.name = Some(name),
+            Self::Set(cmd) => cmd.account.name = Some(name),
+            Self::Remove(cmd) => cmd.account.name = Some(name),
+        }
+    }
+
     #[allow(unused)]
     pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         match self {

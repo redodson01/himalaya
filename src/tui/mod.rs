@@ -438,50 +438,55 @@ async fn execute_flag_op(
     app.status = Some(Status::Working(op.working_status()));
     terminal.draw(|frame| ui::render(frame, app))?;
 
+    let Some(ab) = backends.get(account_key) else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
     let mut error: Option<String> = None;
-    if let Some(ab) = backends.get(account_key) {
-        match id_str.parse::<usize>() {
-            Ok(id) => {
-                let flags = Flags::from_iter([op.flag()]);
-                let result = if op.is_adding() {
-                    ab.backend.add_flags(folder, &[id], &flags).await
-                } else {
-                    ab.backend.remove_flags(folder, &[id], &flags).await
-                };
-                match result {
-                    Ok(_) => {
-                        if let Some(env) = active_envelope_mut(app) {
-                            match &op {
-                                FlagOp::ToggleRead { currently_unseen } => {
-                                    env.unseen = !currently_unseen;
-                                    if *currently_unseen {
-                                        if !env.flags.contains('S') {
-                                            env.flags = sort_flags(&format!("S{}", env.flags));
-                                        }
-                                    } else {
-                                        env.flags = env.flags.replace('S', "");
+    match id_str.parse::<usize>() {
+        Ok(id) => {
+            let flags = Flags::from_iter([op.flag()]);
+            let result = if op.is_adding() {
+                ab.backend.add_flags(folder, &[id], &flags).await
+            } else {
+                ab.backend.remove_flags(folder, &[id], &flags).await
+            };
+            match result {
+                Ok(_) => {
+                    if let Some(env) = active_envelope_mut(app) {
+                        match &op {
+                            FlagOp::ToggleRead { currently_unseen } => {
+                                env.unseen = !currently_unseen;
+                                if *currently_unseen {
+                                    if !env.flags.contains('S') {
+                                        env.flags = sort_flags(&format!("S{}", env.flags));
                                     }
+                                } else {
+                                    env.flags = env.flags.replace('S', "");
                                 }
-                                FlagOp::ToggleFlag { currently_flagged } => {
-                                    env.flagged = !currently_flagged;
-                                    if *currently_flagged {
-                                        env.flags = env.flags.replace('F', "");
-                                    } else if !env.flags.contains('F') {
-                                        env.flags = sort_flags(&format!("F{}", env.flags));
-                                    }
+                            }
+                            FlagOp::ToggleFlag { currently_flagged } => {
+                                env.flagged = !currently_flagged;
+                                if *currently_flagged {
+                                    env.flags = env.flags.replace('F', "");
+                                } else if !env.flags.contains('F') {
+                                    env.flags = sort_flags(&format!("F{}", env.flags));
                                 }
                             }
                         }
-                        if !matches!(app.view, View::MessageList) {
-                            app.view = View::MessageList;
-                        }
-                        app.status = Some(Status::Info(op.success_status()));
                     }
-                    Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+                    if !matches!(app.view, View::MessageList) {
+                        app.view = View::MessageList;
+                    }
+                    app.status = Some(Status::Info(op.success_status()));
                 }
+                Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
             }
-            Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
         }
+        Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
     }
     if let Some(err) = error {
         app.status = Some(Status::Error(err));
@@ -501,39 +506,44 @@ async fn execute_message_op(
     app.status = Some(Status::Working(op.working_status()));
     terminal.draw(|frame| ui::render(frame, app))?;
 
+    let Some(ab) = backends.get(account_key) else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
     let mut error: Option<String> = None;
-    if let Some(ab) = backends.get(account_key) {
-        match id_str.parse::<usize>() {
-            Ok(id) => {
-                let result = match &op {
-                    MessageOp::Delete { folder } => ab.backend.delete_messages(folder, &[id]).await,
-                    MessageOp::Archive {
-                        source_folder,
-                        target_folder,
-                    }
-                    | MessageOp::Move {
-                        source_folder,
-                        target_folder,
-                    } => {
-                        ab.backend
-                            .move_messages(source_folder, target_folder, &[id])
-                            .await
-                    }
-                };
-                match result {
-                    Ok(_) => {
-                        app.remove_envelope(envelope_index);
-                        app.needs_refresh = true;
-                        if !matches!(app.view, View::MessageList) {
-                            app.view = View::MessageList;
-                        }
-                        app.status = Some(Status::Info(op.success_status()));
-                    }
-                    Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+    match id_str.parse::<usize>() {
+        Ok(id) => {
+            let result = match &op {
+                MessageOp::Delete { folder } => ab.backend.delete_messages(folder, &[id]).await,
+                MessageOp::Archive {
+                    source_folder,
+                    target_folder,
                 }
+                | MessageOp::Move {
+                    source_folder,
+                    target_folder,
+                } => {
+                    ab.backend
+                        .move_messages(source_folder, target_folder, &[id])
+                        .await
+                }
+            };
+            match result {
+                Ok(_) => {
+                    app.remove_envelope(envelope_index);
+                    app.needs_refresh = true;
+                    if !matches!(app.view, View::MessageList) {
+                        app.view = View::MessageList;
+                    }
+                    app.status = Some(Status::Info(op.success_status()));
+                }
+                Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
             }
-            Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
         }
+        Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
     }
     if let Some(err) = error {
         app.status = Some(Status::Error(err));
@@ -1262,6 +1272,7 @@ async fn run_event_loop(
                         View::MessageList => Some(Action::ReadMessage),
                         View::FolderList(_) => Some(Action::SelectFolder),
                         View::MoveFolderPicker(_) => Some(Action::ConfirmMove),
+                        View::AccountPicker(_) => Some(Action::ConfirmAccountPicker),
                         _ => None,
                     };
                     if app.confirm_search() {
@@ -1294,6 +1305,11 @@ async fn run_event_loop(
                                 },
                             )
                             .await?;
+                        } else {
+                            app.status = Some(Status::Error(format!(
+                                "No backend for account: {}",
+                                ctx.account_key
+                            )));
                         }
                     }
                 }

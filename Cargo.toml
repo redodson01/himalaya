@@ -16,7 +16,8 @@ features = ["imap", "maildir", "smtp", "sendmail", "oauth2", "wizard", "pgp-comm
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["imap", "maildir", "smtp", "sendmail", "wizard", "pgp-commands"]
+default = ["cli"]
+cli = ["imap", "maildir", "smtp", "sendmail", "wizard", "pgp-commands"]
 imap = ["email-lib/imap", "pimalaya-tui/imap"]
 maildir = ["email-lib/maildir", "pimalaya-tui/maildir"]
 notmuch = ["email-lib/notmuch", "pimalaya-tui/notmuch"]
@@ -52,6 +53,12 @@ toml = "0.8"
 tracing = "0.1"
 url = "2.2"
 uuid = { version = "1.19", features = ["v4"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+serial_test = "3"
 
 [patch.crates-io]
 pimalaya-tui.git = "https://github.com/pimalaya/tui"

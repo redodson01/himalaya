@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt -- --check
+
+  feature-check:
+    name: "Check: ${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-features
+            flags: --no-default-features
+          - name: imap-only
+            flags: --no-default-features --features imap
+          - name: maildir-only
+            flags: --no-default-features --features maildir
+          - name: notmuch-only
+            flags: --no-default-features --features notmuch
+            apt: libnotmuch-dev
+          - name: smtp-only
+            flags: --no-default-features --features smtp
+          - name: sendmail-only
+            flags: --no-default-features --features sendmail
+          - name: keyring-only
+            flags: --no-default-features --features keyring
+          - name: keyring-oauth2
+            flags: --no-default-features --features keyring,oauth2
+          - name: pgp-commands
+            flags: --no-default-features --features pgp-commands
+            apt: gpg
+          - name: pgp-gpg
+            flags: --no-default-features --features pgp-gpg
+            apt: gpg libgpg-error-dev libassuan-dev libgpgme-dev
+          # pgp-native alone fails: email-lib bug (NativePgpSecretKey::Keyring missing without keyring feature)
+          # wizard alone fails: pimalaya-tui bug (tokio::task::JoinError needs rt feature)
+          # Uncomment when upstream fixes land:
+          # - name: pgp-native
+          #   flags: --no-default-features --features pgp-native
+          # - name: wizard-only
+          #   flags: --no-default-features --features wizard
+          - name: default
+            flags: ""
+          - name: all-features
+            flags: --features imap,maildir,smtp,sendmail,oauth2,wizard,pgp-commands,pgp-native
+            apt: gpg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install system dependencies
+        if: matrix.apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: cargo check
+        run: cargo check ${{ matrix.flags }}
+      - name: cargo clippy
+        run: cargo clippy ${{ matrix.flags }} -- -W warnings
+
+  build-tests:
+    name: Build Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+      - name: Build all test binaries
+        run: cargo test --no-run --lib --test cli_smoke --test integration
+
+  unit-tests:
+    name: Unit Tests
+    needs: build-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+          save-if: false
+      - run: cargo test --lib
+
+  cli-tests:
+    name: CLI Smoke Tests
+    needs: build-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+          save-if: false
+      - run: cargo test --test cli_smoke
+
+  integration-tests:
+    name: Integration Tests
+    needs: build-tests
+    runs-on: ubuntu-latest
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.2
+        ports:
+          - 3025:3025
+          - 3143:3143
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+          save-if: false
+      - name: Wait for GreenMail
+        run: |
+          for i in $(seq 1 30); do
+            nc -z localhost 3143 && echo "GreenMail is ready" && exit 0
+            echo "Waiting for GreenMail... ($i/30)"
+            sleep 2
+          done
+          echo "GreenMail failed to start" && exit 1
+      - name: Run integration tests
+        run: cargo test --test integration
+        env:
+          HIMALAYA_INTEGRATION_TEST: "1"

@@ -35,6 +35,7 @@ himalaya envelope list --account posteo --folder Archives.FOSS --page 2
   - [iCloud Mail](#icloud-mail)
 - [Interfaces](#interfaces)
 - [FAQ](#faq)
+- [Testing](#testing)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
@@ -68,18 +69,18 @@ Himalaya CLI can be installed with the `install.sh` installer:
 *As root:*
 
 ```
-curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh | sudo sh
+curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/main/install.sh | sudo sh
 ```
 
 *As a regular user:*
 
 ```
-curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/master/install.sh | PREFIX=~/.local sh
+curl -sSL https://raw.githubusercontent.com/pimalaya/himalaya/main/install.sh | PREFIX=~/.local sh
 ```
 
 These commands install the latest binary from the GitHub [releases](https://github.com/pimalaya/himalaya/releases) section.
 
-If you want a more up-to-date version than the latest release, check out the [releases](https://github.com/pimalaya/himalaya/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section. You will find a pre-built binary matching your OS. These pre-built binaries are built from the `master` branch.
+If you want a more up-to-date version than the latest release, check out the [releases](https://github.com/pimalaya/himalaya/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section. You will find a pre-built binary matching your OS. These pre-built binaries are built from the `main` branch.
 
 *Such binaries are built with the default cargo features. If you need more features, please use another installation method.*
 
@@ -163,7 +164,7 @@ nix-env -i himalaya
 You can also use the git repository for a more up-to-date (but less stable) version:
 
 ```
-nix-env -if https://github.com/pimalaya/himalaya/archive/master.tar.gz
+nix-env -if https://github.com/pimalaya/himalaya/archive/main.tar.gz
 ```
 
 *Or, from within the source tree checkout:*
@@ -687,6 +688,50 @@ These interfaces are built at the top of Himalaya CLI to improve the User Experi
 
   Simply set the environment variable NO_COLOR=1
 </details>
+
+## Testing
+
+Himalaya has three layers of tests:
+
+### Unit tests
+
+```
+cargo test --lib
+```
+
+### CLI smoke tests
+
+Verifies `--help`, `--version`, shell completions, man page generation, and error cases:
+
+```
+cargo test --test cli_smoke
+```
+
+### Integration tests
+
+Requires a running [GreenMail](https://greenmail-mail-test.github.io/greenmail/) server (lightweight IMAP/SMTP test server). Tests folder CRUD, send/receive, flags, and copy/move operations.
+
+Start GreenMail with Docker Compose:
+
+```
+docker compose -f docker-compose.test.yml up -d
+```
+
+Then run the integration tests:
+
+```
+HIMALAYA_INTEGRATION_TEST=1 cargo test --test integration
+```
+
+Stop GreenMail when done:
+
+```
+docker compose -f docker-compose.test.yml down
+```
+
+### CI
+
+All tests run automatically on every pull request via [GitHub Actions](.github/workflows/ci.yml). The CI pipeline also checks formatting (`cargo fmt`) and runs `cargo clippy` across 14 feature combinations.
 
 ## Social
 

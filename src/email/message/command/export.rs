@@ -118,7 +118,7 @@ impl MessageExportCommand {
                 }
                 Some(dest) if dest.is_file() => {
                     let dest = dest.parent().unwrap_or(&dest);
-                    let dest = msg.download_parts(&dest)?;
+                    let dest = msg.download_parts(dest)?;
                     let d = dest.display();
                     println!("Message {id} successfully exported in {d}!");
                     dest

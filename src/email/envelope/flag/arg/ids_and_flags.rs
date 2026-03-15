@@ -46,3 +46,64 @@ pub fn into_tuple(ids_and_flags: &[IdOrFlag]) -> (Vec<usize>, Flags) {
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_or_flag_from_numeric_string() {
+        assert_eq!(IdOrFlag::from("42"), IdOrFlag::Id(42));
+    }
+
+    #[test]
+    fn id_or_flag_from_zero() {
+        assert_eq!(IdOrFlag::from("0"), IdOrFlag::Id(0));
+    }
+
+    #[test]
+    fn id_or_flag_from_negative_is_flag() {
+        assert!(matches!(IdOrFlag::from("-1"), IdOrFlag::Flag(_)));
+    }
+
+    #[test]
+    fn id_or_flag_from_word_is_flag() {
+        assert!(matches!(IdOrFlag::from("seen"), IdOrFlag::Flag(_)));
+    }
+
+    #[test]
+    fn into_tuple_empty() {
+        let (ids, flags) = into_tuple(&[]);
+        assert!(ids.is_empty());
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn into_tuple_mixed() {
+        let input = vec![
+            IdOrFlag::from("1"),
+            IdOrFlag::from("seen"),
+            IdOrFlag::from("2"),
+            IdOrFlag::from("flagged"),
+        ];
+        let (ids, flags) = into_tuple(&input);
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(flags.len(), 2);
+    }
+
+    #[test]
+    fn into_tuple_only_ids() {
+        let input = vec![IdOrFlag::from("10"), IdOrFlag::from("20")];
+        let (ids, flags) = into_tuple(&input);
+        assert_eq!(ids, vec![10, 20]);
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn into_tuple_only_flags() {
+        let input = vec![IdOrFlag::from("seen"), IdOrFlag::from("flagged")];
+        let (ids, flags) = into_tuple(&input);
+        assert!(ids.is_empty());
+        assert_eq!(flags.len(), 2);
+    }
+}

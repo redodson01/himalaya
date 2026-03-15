@@ -18,3 +18,22 @@ impl MessageRawArg {
         self.raw.join(" ").replace('\r', "").replace('\n', "\r\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_raw() {
+        let arg = MessageRawArg { raw: vec![] };
+        assert_eq!(arg.raw(), "");
+    }
+
+    #[test]
+    fn joins_and_normalizes() {
+        let arg = MessageRawArg {
+            raw: vec!["Subject: test\n\nbody".into()],
+        };
+        assert_eq!(arg.raw(), "Subject: test\r\n\r\nbody");
+    }
+}

@@ -96,3 +96,31 @@ impl MessageMailtoCommand {
         editor::edit_tpl_with_editor(account_config, printer, &backend, tpl).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_mailto_url() {
+        let cmd = MessageMailtoCommand::new("mailto:user@example.com");
+        assert!(cmd.is_ok());
+        assert_eq!(cmd.unwrap().url.path(), "user@example.com");
+    }
+
+    #[test]
+    fn mailto_with_query_params() {
+        let cmd = MessageMailtoCommand::new("mailto:user@example.com?subject=Hi&body=Hello");
+        assert!(cmd.is_ok());
+        let cmd = cmd.unwrap();
+        assert_eq!(cmd.url.path(), "user@example.com");
+        let pairs: Vec<_> = cmd.url.query_pairs().collect();
+        assert!(pairs.iter().any(|(k, _)| k == "subject"));
+    }
+
+    #[test]
+    fn invalid_url() {
+        let cmd = MessageMailtoCommand::new("not a url");
+        assert!(cmd.is_err());
+    }
+}

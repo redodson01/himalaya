@@ -1049,6 +1049,7 @@ async fn run_event_loop(
                     app.view = View::MessageList;
                     if app.needs_refresh {
                         app.needs_refresh = false;
+                        app.search = None;
                         refresh_envelope_list(app, backends, terminal).await;
                     }
                 }
@@ -1384,6 +1385,8 @@ async fn run_event_loop(
                             selected: 0,
                             previous_view: Box::new(previous_view),
                         });
+                    } else if backends.is_empty() {
+                        app.status = Some(Status::Error("No accounts available".to_string()));
                     } else if let Err(e) = handle_compose(
                         app,
                         terminal,

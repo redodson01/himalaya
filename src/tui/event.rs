@@ -554,7 +554,6 @@ mod tests {
             folders: Vec::new(),
             selected: 0,
             source_envelope_id: String::new(),
-            source_envelope_index: 0,
             source_folder: String::new(),
             account_key: String::new(),
         })

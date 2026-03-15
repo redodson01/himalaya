@@ -360,6 +360,131 @@ impl MessageOp {
     }
 }
 
+enum FlagOp {
+    ToggleRead { currently_unseen: bool },
+    ToggleFlag { currently_flagged: bool },
+}
+
+impl FlagOp {
+    fn working_status(&self) -> String {
+        match self {
+            FlagOp::ToggleRead {
+                currently_unseen: true,
+            } => "Marking read…".to_string(),
+            FlagOp::ToggleRead {
+                currently_unseen: false,
+            } => "Marking unread…".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: false,
+            } => "Flagging…".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: true,
+            } => "Unflagging…".to_string(),
+        }
+    }
+
+    fn success_status(&self) -> String {
+        match self {
+            FlagOp::ToggleRead {
+                currently_unseen: true,
+            } => "Marked read".to_string(),
+            FlagOp::ToggleRead {
+                currently_unseen: false,
+            } => "Marked unread".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: false,
+            } => "Flagged".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: true,
+            } => "Unflagged".to_string(),
+        }
+    }
+
+    fn error_prefix(&self) -> &'static str {
+        match self {
+            FlagOp::ToggleRead { .. } => "Toggle read failed",
+            FlagOp::ToggleFlag { .. } => "Flag toggle failed",
+        }
+    }
+
+    fn flag(&self) -> Flag {
+        match self {
+            FlagOp::ToggleRead { .. } => Flag::Seen,
+            FlagOp::ToggleFlag { .. } => Flag::Flagged,
+        }
+    }
+
+    fn is_adding(&self) -> bool {
+        match self {
+            FlagOp::ToggleRead { currently_unseen } => *currently_unseen,
+            FlagOp::ToggleFlag { currently_flagged } => !*currently_flagged,
+        }
+    }
+}
+
+async fn execute_flag_op(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    account_key: &str,
+    id_str: &str,
+    folder: &str,
+    op: FlagOp,
+) -> Result<()> {
+    app.status = Some(Status::Working(op.working_status()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    let mut error: Option<String> = None;
+    if let Some(ab) = backends.get(account_key) {
+        match id_str.parse::<usize>() {
+            Ok(id) => {
+                let flags = Flags::from_iter([op.flag()]);
+                let result = if op.is_adding() {
+                    ab.backend.add_flags(folder, &[id], &flags).await
+                } else {
+                    ab.backend.remove_flags(folder, &[id], &flags).await
+                };
+                match result {
+                    Ok(_) => {
+                        if let Some(env) = active_envelope_mut(app) {
+                            match &op {
+                                FlagOp::ToggleRead { currently_unseen } => {
+                                    env.unseen = !currently_unseen;
+                                    if *currently_unseen {
+                                        if !env.flags.contains('S') {
+                                            env.flags = sort_flags(&format!("S{}", env.flags));
+                                        }
+                                    } else {
+                                        env.flags = env.flags.replace('S', "");
+                                    }
+                                }
+                                FlagOp::ToggleFlag { currently_flagged } => {
+                                    env.flagged = !currently_flagged;
+                                    if *currently_flagged {
+                                        env.flags = env.flags.replace('F', "");
+                                    } else if !env.flags.contains('F') {
+                                        env.flags = sort_flags(&format!("F{}", env.flags));
+                                    }
+                                }
+                            }
+                        }
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
+                        }
+                        app.status = Some(Status::Info(op.success_status()));
+                    }
+                    Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+                }
+            }
+            Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+        }
+    }
+    if let Some(err) = error {
+        app.status = Some(Status::Error(err));
+    }
+    Ok(())
+}
+
 async fn execute_message_op(
     app: &mut App,
     terminal: &mut ratatui::DefaultTerminal,
@@ -947,107 +1072,34 @@ async fn run_event_loop(
                 }
                 Action::ToggleRead => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
-                        let label = if ctx.unseen {
-                            "Marking read…"
-                        } else {
-                            "Marking unread…"
-                        };
-                        app.status = Some(Status::Working(label.to_string()));
-                        terminal.draw(|frame| ui::render(frame, app))?;
-
-                        let mut error: Option<String> = None;
-                        if let Some(ab) = backends.get(&ctx.account_key) {
-                            match ctx.id.parse::<usize>() {
-                                Ok(id) => {
-                                    let seen = Flags::from_iter([Flag::Seen]);
-                                    let result = if ctx.unseen {
-                                        ab.backend.add_flags(&ctx.folder, &[id], &seen).await
-                                    } else {
-                                        ab.backend.remove_flags(&ctx.folder, &[id], &seen).await
-                                    };
-                                    match result {
-                                        Ok(_) => {
-                                            if let Some(env) = active_envelope_mut(app) {
-                                                if ctx.unseen {
-                                                    env.unseen = false;
-                                                    if !env.flags.contains('S') {
-                                                        env.flags =
-                                                            sort_flags(&format!("S{}", env.flags));
-                                                    }
-                                                } else {
-                                                    env.unseen = true;
-                                                    env.flags = env.flags.replace('S', "");
-                                                }
-                                            }
-                                            // If in MessageRead, go back to list
-                                            if !matches!(app.view, View::MessageList) {
-                                                app.view = View::MessageList;
-                                            }
-                                            let msg = if ctx.unseen {
-                                                "Marked read"
-                                            } else {
-                                                "Marked unread"
-                                            };
-                                            app.status = Some(Status::Info(msg.to_string()));
-                                        }
-                                        Err(e) => error = Some(format!("Toggle read failed: {e}")),
-                                    }
-                                }
-                                Err(e) => error = Some(format!("Toggle read failed: {e}")),
-                            }
-                        }
-                        if let Some(err) = error {
-                            app.status = Some(Status::Error(err));
-                        }
+                        execute_flag_op(
+                            app,
+                            terminal,
+                            backends,
+                            &ctx.account_key,
+                            &ctx.id,
+                            &ctx.folder,
+                            FlagOp::ToggleRead {
+                                currently_unseen: ctx.unseen,
+                            },
+                        )
+                        .await?;
                     }
                 }
                 Action::ToggleFlag => {
                     if let Some(ctx) = active_envelope_context(app, default_account) {
-                        let label = if ctx.flagged {
-                            "Unflagging…"
-                        } else {
-                            "Flagging…"
-                        };
-                        app.status = Some(Status::Working(label.to_string()));
-                        terminal.draw(|frame| ui::render(frame, app))?;
-
-                        let mut error: Option<String> = None;
-                        if let Some(ab) = backends.get(&ctx.account_key) {
-                            match ctx.id.parse::<usize>() {
-                                Ok(id) => {
-                                    let flagged = Flags::from_iter([Flag::Flagged]);
-                                    let result = if ctx.flagged {
-                                        ab.backend.remove_flags(&ctx.folder, &[id], &flagged).await
-                                    } else {
-                                        ab.backend.add_flags(&ctx.folder, &[id], &flagged).await
-                                    };
-                                    match result {
-                                        Ok(_) => {
-                                            if let Some(env) = active_envelope_mut(app) {
-                                                env.flagged = !ctx.flagged;
-                                                if ctx.flagged {
-                                                    env.flags = env.flags.replace('F', "");
-                                                } else if !env.flags.contains('F') {
-                                                    env.flags =
-                                                        sort_flags(&format!("F{}", env.flags));
-                                                }
-                                            }
-                                            if !matches!(app.view, View::MessageList) {
-                                                app.view = View::MessageList;
-                                            }
-                                            let msg =
-                                                if ctx.flagged { "Unflagged" } else { "Flagged" };
-                                            app.status = Some(Status::Info(msg.to_string()));
-                                        }
-                                        Err(e) => error = Some(format!("Flag toggle failed: {e}")),
-                                    }
-                                }
-                                Err(e) => error = Some(format!("Flag toggle failed: {e}")),
-                            }
-                        }
-                        if let Some(err) = error {
-                            app.status = Some(Status::Error(err));
-                        }
+                        execute_flag_op(
+                            app,
+                            terminal,
+                            backends,
+                            &ctx.account_key,
+                            &ctx.id,
+                            &ctx.folder,
+                            FlagOp::ToggleFlag {
+                                currently_flagged: ctx.flagged,
+                            },
+                        )
+                        .await?;
                     }
                 }
                 Action::OpenFolderList => {

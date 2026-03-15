@@ -13,14 +13,18 @@ use email::{
     envelope::list::ListEnvelopesOptions,
     flag::{Flag, Flags},
     folder::list::ListFolders,
+    message::Message,
 };
-use pimalaya_tui::{himalaya::backend::BackendBuilder, terminal::config::TomlConfig as _};
+use pimalaya_tui::{
+    himalaya::{backend::BackendBuilder, editor},
+    terminal::{cli::printer::StdoutPrinter, config::TomlConfig as _},
+};
 
 use crate::config::TomlConfig;
 
 use self::app::{
-    sort_flags, AccountSection, App, EnvelopeData, FolderContext, FolderEntry, FolderListState,
-    FolderSection, SavedListState, Status, View,
+    sort_flags, AccountPickerState, AccountSection, App, EnvelopeData, FolderContext, FolderEntry,
+    FolderListState, FolderSection, MoveFolderPickerState, SavedListState, Status, View,
 };
 use self::event::{handle_event, Action};
 
@@ -260,7 +264,6 @@ struct AccountBackend {
     account_config: Arc<email::account::config::AccountConfig>,
     source_folder: String,
     archive_folder: String,
-    #[allow(dead_code)]
     toml_account_config: Arc<crate::account::config::TomlAccountConfig>,
 }
 
@@ -285,6 +288,7 @@ struct EnvelopeContext {
     id: String,
     unseen: bool,
     flagged: bool,
+    is_draft: bool,
     account_key: String,
     folder: String,
 }
@@ -307,6 +311,7 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
             id: env.id.clone(),
             unseen: env.unseen,
             flagged: env.flagged,
+            is_draft: env.flags.contains('T'),
             account_key,
             folder,
         }
@@ -316,6 +321,224 @@ fn active_envelope_context(app: &App, default_account: &str) -> Option<EnvelopeC
 /// Get a mutable reference to the active envelope in the current context.
 fn active_envelope_mut(app: &mut App) -> Option<&mut EnvelopeData> {
     app.envelopes.get_mut(app.selected)
+}
+
+/// The kind of message operation to execute.
+enum MessageOp {
+    Delete {
+        folder: String,
+    },
+    Archive {
+        source_folder: String,
+        target_folder: String,
+    },
+    Move {
+        source_folder: String,
+        target_folder: String,
+    },
+}
+
+impl MessageOp {
+    fn working_status(&self) -> String {
+        match self {
+            MessageOp::Delete { .. } => "Deleting\u{2026}".to_string(),
+            MessageOp::Archive { .. } => "Archiving\u{2026}".to_string(),
+            MessageOp::Move { target_folder, .. } => format!("Moving to {target_folder}\u{2026}"),
+        }
+    }
+
+    fn success_status(&self) -> String {
+        match self {
+            MessageOp::Delete { .. } => "Deleted".to_string(),
+            MessageOp::Archive { .. } => "Archived".to_string(),
+            MessageOp::Move { target_folder, .. } => format!("Moved to {target_folder}"),
+        }
+    }
+
+    fn error_prefix(&self) -> &'static str {
+        match self {
+            MessageOp::Delete { .. } => "Delete failed",
+            MessageOp::Archive { .. } => "Archive failed",
+            MessageOp::Move { .. } => "Move failed",
+        }
+    }
+}
+
+enum FlagOp {
+    ToggleRead { currently_unseen: bool },
+    ToggleFlag { currently_flagged: bool },
+}
+
+impl FlagOp {
+    fn working_status(&self) -> String {
+        match self {
+            FlagOp::ToggleRead {
+                currently_unseen: true,
+            } => "Marking read…".to_string(),
+            FlagOp::ToggleRead {
+                currently_unseen: false,
+            } => "Marking unread…".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: false,
+            } => "Flagging…".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: true,
+            } => "Unflagging…".to_string(),
+        }
+    }
+
+    fn success_status(&self) -> String {
+        match self {
+            FlagOp::ToggleRead {
+                currently_unseen: true,
+            } => "Marked read".to_string(),
+            FlagOp::ToggleRead {
+                currently_unseen: false,
+            } => "Marked unread".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: false,
+            } => "Flagged".to_string(),
+            FlagOp::ToggleFlag {
+                currently_flagged: true,
+            } => "Unflagged".to_string(),
+        }
+    }
+
+    fn error_prefix(&self) -> &'static str {
+        match self {
+            FlagOp::ToggleRead { .. } => "Toggle read failed",
+            FlagOp::ToggleFlag { .. } => "Flag toggle failed",
+        }
+    }
+
+    fn flag(&self) -> Flag {
+        match self {
+            FlagOp::ToggleRead { .. } => Flag::Seen,
+            FlagOp::ToggleFlag { .. } => Flag::Flagged,
+        }
+    }
+
+    fn is_adding(&self) -> bool {
+        match self {
+            FlagOp::ToggleRead { currently_unseen } => *currently_unseen,
+            FlagOp::ToggleFlag { currently_flagged } => !*currently_flagged,
+        }
+    }
+}
+
+async fn execute_flag_op(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    account_key: &str,
+    id_str: &str,
+    folder: &str,
+    op: FlagOp,
+) -> Result<()> {
+    app.status = Some(Status::Working(op.working_status()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    let mut error: Option<String> = None;
+    if let Some(ab) = backends.get(account_key) {
+        match id_str.parse::<usize>() {
+            Ok(id) => {
+                let flags = Flags::from_iter([op.flag()]);
+                let result = if op.is_adding() {
+                    ab.backend.add_flags(folder, &[id], &flags).await
+                } else {
+                    ab.backend.remove_flags(folder, &[id], &flags).await
+                };
+                match result {
+                    Ok(_) => {
+                        if let Some(env) = active_envelope_mut(app) {
+                            match &op {
+                                FlagOp::ToggleRead { currently_unseen } => {
+                                    env.unseen = !currently_unseen;
+                                    if *currently_unseen {
+                                        if !env.flags.contains('S') {
+                                            env.flags = sort_flags(&format!("S{}", env.flags));
+                                        }
+                                    } else {
+                                        env.flags = env.flags.replace('S', "");
+                                    }
+                                }
+                                FlagOp::ToggleFlag { currently_flagged } => {
+                                    env.flagged = !currently_flagged;
+                                    if *currently_flagged {
+                                        env.flags = env.flags.replace('F', "");
+                                    } else if !env.flags.contains('F') {
+                                        env.flags = sort_flags(&format!("F{}", env.flags));
+                                    }
+                                }
+                            }
+                        }
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
+                        }
+                        app.status = Some(Status::Info(op.success_status()));
+                    }
+                    Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+                }
+            }
+            Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+        }
+    }
+    if let Some(err) = error {
+        app.status = Some(Status::Error(err));
+    }
+    Ok(())
+}
+
+async fn execute_message_op(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    account_key: &str,
+    id_str: &str,
+    envelope_index: usize,
+    op: MessageOp,
+) -> Result<()> {
+    app.status = Some(Status::Working(op.working_status()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    let mut error: Option<String> = None;
+    if let Some(ab) = backends.get(account_key) {
+        match id_str.parse::<usize>() {
+            Ok(id) => {
+                let result = match &op {
+                    MessageOp::Delete { folder } => ab.backend.delete_messages(folder, &[id]).await,
+                    MessageOp::Archive {
+                        source_folder,
+                        target_folder,
+                    }
+                    | MessageOp::Move {
+                        source_folder,
+                        target_folder,
+                    } => {
+                        ab.backend
+                            .move_messages(source_folder, target_folder, &[id])
+                            .await
+                    }
+                };
+                match result {
+                    Ok(_) => {
+                        app.remove_envelope(envelope_index);
+                        app.needs_refresh = true;
+                        if !matches!(app.view, View::MessageList) {
+                            app.view = View::MessageList;
+                        }
+                        app.status = Some(Status::Info(op.success_status()));
+                    }
+                    Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+                }
+            }
+            Err(e) => error = Some(format!("{}: {e}", op.error_prefix())),
+        }
+    }
+    if let Some(err) = error {
+        app.status = Some(Status::Error(err));
+    }
+    Ok(())
 }
 
 /// Re-fetch the envelope list from backends, context-aware.
@@ -414,9 +637,250 @@ async fn refresh_envelope_list(
     app.status = None;
 }
 
+enum ComposeKind {
+    New,
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+async fn build_compose_backend(
+    toml_account_config: &Arc<crate::account::config::TomlAccountConfig>,
+    account_config: &Arc<email::account::config::AccountConfig>,
+) -> Result<pimalaya_tui::himalaya::backend::Backend> {
+    BackendBuilder::new(
+        toml_account_config.clone(),
+        account_config.clone(),
+        |builder| {
+            builder
+                .without_features()
+                .with_add_message(BackendFeatureSource::Context)
+                .with_send_message(BackendFeatureSource::Context)
+        },
+    )
+    .build()
+    .await
+}
+
+async fn run_editor_flow(
+    terminal: &mut ratatui::DefaultTerminal,
+    toml_account_config: &Arc<crate::account::config::TomlAccountConfig>,
+    account_config: &Arc<email::account::config::AccountConfig>,
+    tpl: email::template::Template,
+) -> Result<()> {
+    let compose_backend = build_compose_backend(toml_account_config, account_config).await?;
+
+    if std::env::var("EDITOR").is_err() {
+        // SAFETY: Called while the TUI event loop is paused (single
+        // thread of control). The `unused_unsafe` allow keeps this
+        // compiling on edition 2021 while being forward-compatible
+        // with edition 2024 where `set_var` becomes unsafe.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("EDITOR", "vi");
+        }
+    }
+
+    ratatui::restore();
+
+    let mut printer = StdoutPrinter::default();
+    let result =
+        editor::edit_tpl_with_editor(account_config.clone(), &mut printer, &compose_backend, tpl)
+            .await;
+
+    *terminal = ratatui::init();
+
+    result
+}
+
+async fn handle_compose(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    default_account: &str,
+    kind: ComposeKind,
+    account_override: Option<&str>,
+) -> Result<()> {
+    // Determine account key and envelope context
+    let (account_key, envelope_id, folder) = match kind {
+        ComposeKind::New => {
+            let mut key = if let Some(ovr) = account_override {
+                ovr.to_string()
+            } else {
+                account_key_for(app, default_account)
+            };
+            // If key doesn't match a backend (e.g. empty list in multi-account),
+            // fall back to the first available account.
+            if !backends.contains_key(&key) {
+                key = backends.keys().min().cloned().unwrap_or_default();
+            }
+            let folder = backends
+                .get(&key)
+                .map(|ab| ab.source_folder.clone())
+                .unwrap_or_default();
+            (key, None, folder)
+        }
+        _ => {
+            if let Some(ctx) = active_envelope_context(app, default_account) {
+                let id: Option<usize> = ctx.id.parse().ok();
+                (ctx.account_key, id, ctx.folder)
+            } else {
+                app.status = Some(Status::Error("No message selected".to_string()));
+                return Ok(());
+            }
+        }
+    };
+
+    let Some(ab) = backends.get(&account_key) else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
+    let status_msg = match kind {
+        ComposeKind::New => "Composing…",
+        ComposeKind::Reply => "Preparing reply…",
+        ComposeKind::ReplyAll => "Preparing reply all…",
+        ComposeKind::Forward => "Preparing forward…",
+    };
+    app.status = Some(Status::Working(status_msg.to_string()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    // Build the template
+    let tpl = match kind {
+        ComposeKind::New => {
+            Message::new_tpl_builder(ab.account_config.clone())
+                .build()
+                .await
+        }
+        ComposeKind::Reply | ComposeKind::ReplyAll => {
+            let id = envelope_id.ok_or_else(|| color_eyre::eyre::eyre!("Invalid envelope ID"))?;
+            let msgs = ab.backend.get_messages(&folder, &[id]).await?;
+            let msg = msgs
+                .first()
+                .ok_or_else(|| color_eyre::eyre::eyre!("Cannot find message {id}"))?;
+            msg.to_reply_tpl_builder(ab.account_config.clone())
+                .with_reply_all(matches!(kind, ComposeKind::ReplyAll))
+                .build()
+                .await
+        }
+        ComposeKind::Forward => {
+            let id = envelope_id.ok_or_else(|| color_eyre::eyre::eyre!("Invalid envelope ID"))?;
+            let msgs = ab.backend.get_messages(&folder, &[id]).await?;
+            let msg = msgs
+                .first()
+                .ok_or_else(|| color_eyre::eyre::eyre!("Cannot find message {id}"))?;
+            msg.to_forward_tpl_builder(ab.account_config.clone())
+                .build()
+                .await
+        }
+    };
+
+    let tpl = match tpl {
+        Ok(t) => t,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Template error: {e}")));
+            return Ok(());
+        }
+    };
+
+    match run_editor_flow(terminal, &ab.toml_account_config, &ab.account_config, tpl).await {
+        Ok(()) => {
+            // For reply/reply-all, add Answered flag
+            if matches!(kind, ComposeKind::Reply | ComposeKind::ReplyAll) {
+                if let Some(id) = envelope_id {
+                    let _ = ab.backend.add_flag(&folder, &[id], Flag::Answered).await;
+                }
+            }
+            // Refresh envelope list
+            refresh_envelope_list(app, backends, terminal).await;
+        }
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Editor error: {e}")));
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_edit_message(
+    app: &mut App,
+    terminal: &mut ratatui::DefaultTerminal,
+    backends: &BackendMap,
+    default_account: &str,
+) -> Result<()> {
+    let ctx = match active_envelope_context(app, default_account) {
+        Some(ctx) => ctx,
+        None => {
+            app.status = Some(Status::Error("No message selected".to_string()));
+            return Ok(());
+        }
+    };
+
+    let (id_str, account_key, folder, is_draft) =
+        (ctx.id, ctx.account_key, ctx.folder, ctx.is_draft);
+
+    let Some(ab) = backends.get(&account_key) else {
+        app.status = Some(Status::Error(format!(
+            "No backend for account: {account_key}"
+        )));
+        return Ok(());
+    };
+
+    let id: usize = match id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            app.status = Some(Status::Error(format!("Invalid envelope ID: {id_str}")));
+            return Ok(());
+        }
+    };
+
+    app.status = Some(Status::Working("Editing…".to_string()));
+    terminal.draw(|frame| ui::render(frame, app))?;
+
+    // Fetch message and build editable template
+    let tpl = match ab.backend.get_messages(&folder, &[id]).await {
+        Ok(msgs) => match msgs.first() {
+            Some(msg) => msg.to_read_tpl(&ab.account_config, |tpl| tpl).await,
+            None => {
+                app.status = Some(Status::Error(format!("Cannot find message {id}")));
+                return Ok(());
+            }
+        },
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Fetch failed: {e}")));
+            return Ok(());
+        }
+    };
+
+    let tpl = match tpl {
+        Ok(t) => t,
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Template error: {e}")));
+            return Ok(());
+        }
+    };
+
+    match run_editor_flow(terminal, &ab.toml_account_config, &ab.account_config, tpl).await {
+        Ok(()) => {
+            if is_draft {
+                let _ = ab.backend.delete_messages(&folder, &[id]).await;
+            }
+            refresh_envelope_list(app, backends, terminal).await;
+        }
+        Err(e) => {
+            app.status = Some(Status::Error(format!("Editor error: {e}")));
+        }
+    }
+
+    Ok(())
+}
+
 async fn fetch_folder_list(
     backends: &BackendMap,
     account_filter: Option<&str>,
+    exclude_folder: Option<&str>,
 ) -> Result<(Vec<FolderEntry>, Vec<FolderSection>), String> {
     let mut folders = Vec::new();
     let mut sections = Vec::new();
@@ -438,11 +902,13 @@ async fn fetch_folder_list(
                     let account_folders: Vec<email::folder::Folder> = account_folders.into();
                     let mut count = 0;
                     for f in account_folders {
-                        folders.push(FolderEntry {
-                            name: f.name,
-                            account: key.clone(),
-                        });
-                        count += 1;
+                        if exclude_folder.is_none_or(|ex| f.name != ex) {
+                            folders.push(FolderEntry {
+                                name: f.name,
+                                account: key.clone(),
+                            });
+                            count += 1;
+                        }
                     }
                     if count > 0 {
                         sections.push(FolderSection {
@@ -471,411 +937,547 @@ async fn run_event_loop(
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        let action = handle_event(&app.view, &app.folder_context, app.search.is_some())?;
+        let mut action = handle_event(&app.view, &app.folder_context, app.search.is_some())?;
 
         // Clear transient status on any keypress
         if !matches!(action, Action::None) && app.status.is_some() {
             app.status = None;
         }
 
-        match action {
-            Action::None => {}
-            Action::Quit => {
-                app.should_quit = true;
-            }
-            Action::SelectNext => {
-                if app.search.is_some() {
-                    app.search_select_next();
-                } else {
-                    app.select_next();
+        // This loop allows SearchConfirm to set a follow-up action and re-enter.
+        let mut clear_search_after = false;
+        loop {
+            match action {
+                Action::None => {}
+                Action::Quit => {
+                    app.should_quit = true;
                 }
-            }
-            Action::SelectPrev => {
-                if app.search.is_some() {
-                    app.search_select_prev();
-                } else {
-                    app.select_prev();
-                }
-            }
-            Action::ReadMessage | Action::NextMessage => {
-                // Advance selection for NextMessage, with "no more" feedback
-                if matches!(action, Action::NextMessage) {
-                    if matches!(app.view, View::MessageRead { .. }) {
-                        let prev = app.selected;
+                Action::SelectNext => {
+                    if app.search.is_some() {
+                        app.search_select_next();
+                    } else {
                         app.select_next();
-                        if app.selected == prev {
-                            app.status = Some(Status::Info("No more messages".to_string()));
+                    }
+                }
+                Action::SelectPrev => {
+                    if app.search.is_some() {
+                        app.search_select_prev();
+                    } else {
+                        app.select_prev();
+                    }
+                }
+                Action::ReadMessage | Action::NextMessage => {
+                    // Advance selection for NextMessage, with "no more" feedback
+                    if matches!(action, Action::NextMessage) {
+                        if matches!(app.view, View::MessageRead { .. }) {
+                            let prev = app.selected;
+                            app.select_next();
+                            if app.selected == prev {
+                                app.status = Some(Status::Info("No more messages".to_string()));
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        app.status = Some(Status::Working("Loading…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        let content = if let Some(ab) = backends.get(&ctx.account_key) {
+                            match ctx.id.parse::<usize>() {
+                                Ok(id) => match ab.backend.get_messages(&ctx.folder, &[id]).await {
+                                    Ok(emails) => {
+                                        let mut body = String::new();
+                                        for email in emails.to_vec() {
+                                            match email
+                                                .to_read_tpl(&ab.account_config, |tpl| tpl)
+                                                .await
+                                            {
+                                                Ok(tpl) => body.push_str(&tpl),
+                                                Err(e) => body.push_str(&format!(
+                                                    "Error reading message: {e}"
+                                                )),
+                                            }
+                                        }
+                                        body
+                                    }
+                                    Err(e) => format!("Error fetching message: {e}"),
+                                },
+                                Err(_) => format!("Invalid envelope ID: {}", ctx.id),
+                            }
+                        } else {
+                            format!("No backend for account: {}", ctx.account_key)
+                        };
+
+                        // Mark as seen locally
+                        if ctx.unseen {
+                            if let Some(env) = active_envelope_mut(app) {
+                                env.unseen = false;
+                                if !env.flags.contains('S') {
+                                    env.flags = sort_flags(&format!("S{}", env.flags));
+                                }
+                            }
+                        }
+
+                        // Transition to MessageRead
+                        app.status = None;
+                        app.view = View::MessageRead { content, scroll: 0 };
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        // Mark as read on server (best-effort; log failures)
+                        if ctx.unseen {
+                            if let Some(ab) = backends.get(&ctx.account_key) {
+                                if let Ok(id) = ctx.id.parse::<usize>() {
+                                    let seen = Flags::from_iter([Flag::Seen]);
+                                    if let Err(e) =
+                                        ab.backend.add_flags(&ctx.folder, &[id], &seen).await
+                                    {
+                                        tracing::warn!(
+                                            account = ctx.account_key,
+                                            id,
+                                            "failed to mark message as read on server: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Action::BackToList => {
+                    app.view = View::MessageList;
+                    if app.needs_refresh {
+                        app.needs_refresh = false;
+                        app.search = None;
+                        refresh_envelope_list(app, backends, terminal).await;
+                    }
+                }
+                Action::BackFromFolder => {
+                    // Restore previous list state from saved_list_state if available
+                    if let Some(saved) = app.saved_list_state.take() {
+                        app.envelopes = saved.envelopes;
+                        app.sections = saved.sections;
+                        app.selected = saved.selected;
+                        app.folder_context = saved.folder_context;
+                    } else {
+                        app.folder_context = FolderContext::AllInboxes;
+                    }
+                    app.view = View::MessageList;
+                    app.search = None;
+                    refresh_envelope_list(app, backends, terminal).await;
+                }
+                Action::ScrollDown => {
+                    if let View::MessageRead { scroll, .. } = &mut app.view {
+                        *scroll = scroll.saturating_add(1);
+                    }
+                }
+                Action::ScrollUp => {
+                    if let View::MessageRead { scroll, .. } = &mut app.view {
+                        *scroll = scroll.saturating_sub(1);
+                    }
+                }
+                Action::DeleteMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        execute_message_op(
+                            app,
+                            terminal,
+                            backends,
+                            &ctx.account_key,
+                            &ctx.id,
+                            app.selected,
+                            MessageOp::Delete { folder: ctx.folder },
+                        )
+                        .await?;
+                    }
+                }
+                Action::ToggleRead => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        execute_flag_op(
+                            app,
+                            terminal,
+                            backends,
+                            &ctx.account_key,
+                            &ctx.id,
+                            &ctx.folder,
+                            FlagOp::ToggleRead {
+                                currently_unseen: ctx.unseen,
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                Action::ToggleFlag => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        execute_flag_op(
+                            app,
+                            terminal,
+                            backends,
+                            &ctx.account_key,
+                            &ctx.id,
+                            &ctx.folder,
+                            FlagOp::ToggleFlag {
+                                currently_flagged: ctx.flagged,
+                            },
+                        )
+                        .await?;
+                    }
+                }
+                Action::OpenFolderList => {
+                    app.status = Some(Status::Working("Loading folders…".to_string()));
+                    terminal.draw(|frame| ui::render(frame, app))?;
+
+                    // Save current state before transitioning
+                    app.saved_list_state = Some(SavedListState {
+                        folder_context: app.folder_context.clone(),
+                        envelopes: app.envelopes.clone(),
+                        sections: app.sections.clone(),
+                        selected: app.selected,
+                    });
+                    app.search = None;
+
+                    match fetch_folder_list(backends, None, None).await {
+                        Ok((folders, sections)) => {
+                            app.status = None;
+                            app.view = View::FolderList(FolderListState {
+                                folders,
+                                sections,
+                                selected: 0,
+                            });
+                        }
+                        Err(err) => {
+                            app.status = Some(Status::Error(err));
+                        }
+                    }
+                }
+                Action::FolderSelectNext => {
+                    if app.search.is_some() {
+                        app.search_select_next();
+                    } else {
+                        app.folder_select_next();
+                    }
+                }
+                Action::FolderSelectPrev => {
+                    if app.search.is_some() {
+                        app.search_select_prev();
+                    } else {
+                        app.folder_select_prev();
+                    }
+                }
+                Action::BackFromFolderPicker => {
+                    // Restore saved state
+                    if let Some(saved) = app.saved_list_state.take() {
+                        app.envelopes = saved.envelopes;
+                        app.sections = saved.sections;
+                        app.selected = saved.selected;
+                        app.folder_context = saved.folder_context;
+                    }
+                    app.view = View::MessageList;
+                    app.search = None;
+                    refresh_envelope_list(app, backends, terminal).await;
+                }
+                Action::CancelMove => {
+                    app.view = View::MessageList;
+                    app.search = None;
+                }
+                Action::SelectFolder => {
+                    // Extract folder info from the FolderList state
+                    let folder_info = if let View::FolderList(state) = &app.view {
+                        state
+                            .folders
+                            .get(state.selected)
+                            .map(|f| (f.name.clone(), f.account.clone()))
+                    } else {
+                        None
+                    };
+
+                    if let Some((folder_name, account_key)) = folder_info {
+                        app.status = Some(Status::Working(format!("Loading {folder_name}…")));
+                        terminal.draw(|frame| ui::render(frame, app))?;
+
+                        // Resolve the backend key
+                        let key = if !account_key.is_empty() {
+                            account_key.clone()
+                        } else if backends.contains_key(default_account) {
+                            default_account.to_string()
+                        } else {
+                            backends.keys().next().cloned().unwrap_or_default()
+                        };
+
+                        let mut error: Option<String> = None;
+                        let mut envelope_data = Vec::new();
+
+                        if let Some(ab) = backends.get(&key) {
+                            let page_size = ab.account_config.get_envelope_list_page_size();
+                            let opts = ListEnvelopesOptions {
+                                page: 0,
+                                page_size,
+                                query: None,
+                            };
+                            match ab.backend.list_envelopes(&folder_name, opts).await {
+                                Ok(envelopes) => {
+                                    envelope_data =
+                                        envelopes.iter().map(EnvelopeData::from).collect();
+                                    for env in &mut envelope_data {
+                                        env.account = key.clone();
+                                    }
+                                }
+                                Err(e) => {
+                                    error = Some(format!("Error loading envelopes: {e}"));
+                                }
+                            }
+                        }
+
+                        if let Some(err) = error {
+                            app.status = Some(Status::Error(err));
+                        } else {
+                            app.status = None;
+                            app.folder_context = FolderContext::SingleFolder {
+                                folder_name,
+                                account_key: key.clone(),
+                            };
+                            app.sections = vec![AccountSection {
+                                name: key,
+                                start: 0,
+                                count: envelope_data.len(),
+                            }];
+                            app.envelopes = envelope_data;
+                            app.selected = 0;
+                            app.view = View::MessageList;
+                            app.search = None;
+                        }
+                    }
+                }
+                Action::StartSearch => {
+                    app.start_search();
+                }
+                Action::SearchChar(c) => {
+                    app.search_push_char(c);
+                }
+                Action::SearchBackspace => {
+                    app.search_pop_char();
+                }
+                Action::SearchConfirm => {
+                    let follow_up = match &app.view {
+                        View::MessageList => Some(Action::ReadMessage),
+                        View::FolderList(_) => Some(Action::SelectFolder),
+                        View::MoveFolderPicker(_) => Some(Action::ConfirmMove),
+                        _ => None,
+                    };
+                    if app.confirm_search() {
+                        if let Some(next_action) = follow_up {
+                            action = next_action;
+                            clear_search_after = true;
                             continue;
                         }
-                    } else {
-                        continue;
                     }
+                    // Clear search if no follow-up (e.g. empty results already cleared)
+                    app.cancel_search();
                 }
-
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    app.status = Some(Status::Working("Loading…".to_string()));
-                    terminal.draw(|frame| ui::render(frame, app))?;
-
-                    let content = if let Some(ab) = backends.get(&ctx.account_key) {
-                        match ctx.id.parse::<usize>() {
-                            Ok(id) => match ab.backend.get_messages(&ctx.folder, &[id]).await {
-                                Ok(emails) => {
-                                    let mut body = String::new();
-                                    for email in emails.to_vec() {
-                                        match email.to_read_tpl(&ab.account_config, |tpl| tpl).await
-                                        {
-                                            Ok(tpl) => body.push_str(&tpl),
-                                            Err(e) => body
-                                                .push_str(&format!("Error reading message: {e}")),
-                                        }
-                                    }
-                                    body
-                                }
-                                Err(e) => format!("Error fetching message: {e}"),
-                            },
-                            Err(_) => format!("Invalid envelope ID: {}", ctx.id),
-                        }
-                    } else {
-                        format!("No backend for account: {}", ctx.account_key)
-                    };
-
-                    // Mark as seen locally
-                    if ctx.unseen {
-                        if let Some(env) = active_envelope_mut(app) {
-                            env.unseen = false;
-                            if !env.flags.contains('S') {
-                                env.flags = sort_flags(&format!("S{}", env.flags));
-                            }
-                        }
-                    }
-
-                    // Transition to MessageRead
-                    app.status = None;
-                    app.view = View::MessageRead { content, scroll: 0 };
-                    terminal.draw(|frame| ui::render(frame, app))?;
-
-                    // Mark as read on server (best-effort; log failures)
-                    if ctx.unseen {
+                Action::SearchCancel => {
+                    app.cancel_search();
+                }
+                Action::ArchiveMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
                         if let Some(ab) = backends.get(&ctx.account_key) {
-                            if let Ok(id) = ctx.id.parse::<usize>() {
-                                let seen = Flags::from_iter([Flag::Seen]);
-                                if let Err(e) =
-                                    ab.backend.add_flags(&ctx.folder, &[id], &seen).await
-                                {
-                                    tracing::warn!(
-                                        account = ctx.account_key,
-                                        id,
-                                        "failed to mark message as read on server: {e}"
-                                    );
-                                }
-                            }
+                            let archive_folder = ab.archive_folder.clone();
+                            execute_message_op(
+                                app,
+                                terminal,
+                                backends,
+                                &ctx.account_key,
+                                &ctx.id,
+                                app.selected,
+                                MessageOp::Archive {
+                                    source_folder: ctx.folder,
+                                    target_folder: archive_folder,
+                                },
+                            )
+                            .await?;
                         }
                     }
                 }
-            }
-            Action::BackToList => {
-                app.view = View::MessageList;
-            }
-            Action::BackFromFolder => {
-                // Restore previous list state from saved_list_state if available
-                if let Some(saved) = app.saved_list_state.take() {
-                    app.envelopes = saved.envelopes;
-                    app.sections = saved.sections;
-                    app.selected = saved.selected;
-                    app.folder_context = saved.folder_context;
-                } else {
-                    app.folder_context = FolderContext::AllInboxes;
-                }
-                app.view = View::MessageList;
-                app.search = None;
-                refresh_envelope_list(app, backends, terminal).await;
-            }
-            Action::ScrollDown => {
-                if let View::MessageRead { scroll, .. } = &mut app.view {
-                    *scroll = scroll.saturating_add(1);
-                }
-            }
-            Action::ScrollUp => {
-                if let View::MessageRead { scroll, .. } = &mut app.view {
-                    *scroll = scroll.saturating_sub(1);
-                }
-            }
-            Action::DeleteMessage => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    if let Some(ab) = backends.get(&ctx.account_key) {
-                        match ctx.id.parse::<usize>() {
-                            Ok(id) => {
-                                app.status = Some(Status::Working("Deleting…".into()));
-                                terminal.draw(|frame| ui::render(frame, app))?;
-                                match ab.backend.delete_messages(&ctx.folder, &[id]).await {
-                                    Ok(_) => {
-                                        app.remove_envelope(app.selected);
-                                        app.view = View::MessageList;
-                                        app.status = Some(Status::Info("Deleted".into()));
-                                    }
-                                    Err(e) => {
-                                        app.status =
-                                            Some(Status::Error(format!("Delete failed: {e}")));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                app.status = Some(Status::Error(format!("Delete failed: {e}")));
-                            }
-                        }
-                    }
-                }
-            }
-            Action::ArchiveMessage => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    if let Some(ab) = backends.get(&ctx.account_key) {
-                        let archive_folder = ab.archive_folder.clone();
-                        match ctx.id.parse::<usize>() {
-                            Ok(id) => {
-                                app.status = Some(Status::Working("Archiving…".into()));
-                                terminal.draw(|frame| ui::render(frame, app))?;
-                                match ab
-                                    .backend
-                                    .move_messages(&ctx.folder, &archive_folder, &[id])
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        app.remove_envelope(app.selected);
-                                        app.view = View::MessageList;
-                                        app.status = Some(Status::Info(format!(
-                                            "Archived to {archive_folder}"
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        app.status =
-                                            Some(Status::Error(format!("Archive failed: {e}")));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                app.status = Some(Status::Error(format!("Archive failed: {e}")));
-                            }
-                        }
-                    }
-                }
-            }
-            Action::ToggleRead => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    if let Some(ab) = backends.get(&ctx.account_key) {
-                        match ctx.id.parse::<usize>() {
-                            Ok(id) => {
-                                let seen = Flags::from_iter([Flag::Seen]);
-                                let result = if ctx.unseen {
-                                    ab.backend.add_flags(&ctx.folder, &[id], &seen).await
-                                } else {
-                                    ab.backend.remove_flags(&ctx.folder, &[id], &seen).await
-                                };
-                                match result {
-                                    Ok(_) => {
-                                        let env = &mut app.envelopes[app.selected];
-                                        env.unseen = !ctx.unseen;
-                                        if ctx.unseen {
-                                            if !env.flags.contains('S') {
-                                                env.flags = sort_flags(&format!("S{}", env.flags));
-                                            }
-                                            app.status =
-                                                Some(Status::Info("Marked as read".into()));
-                                        } else {
-                                            env.flags = env.flags.replace('S', "");
-                                            app.status =
-                                                Some(Status::Info("Marked as unread".into()));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        app.status =
-                                            Some(Status::Error(format!("Toggle read failed: {e}")));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                app.status =
-                                    Some(Status::Error(format!("Toggle read failed: {e}")));
-                            }
-                        }
-                    }
-                }
-            }
-            Action::ToggleFlag => {
-                if let Some(ctx) = active_envelope_context(app, default_account) {
-                    if let Some(ab) = backends.get(&ctx.account_key) {
-                        match ctx.id.parse::<usize>() {
-                            Ok(id) => {
-                                let flagged = Flags::from_iter([Flag::Flagged]);
-                                let result = if ctx.flagged {
-                                    ab.backend.remove_flags(&ctx.folder, &[id], &flagged).await
-                                } else {
-                                    ab.backend.add_flags(&ctx.folder, &[id], &flagged).await
-                                };
-                                match result {
-                                    Ok(_) => {
-                                        let env = &mut app.envelopes[app.selected];
-                                        env.flagged = !ctx.flagged;
-                                        if ctx.flagged {
-                                            env.flags = env.flags.replace('F', "");
-                                            app.status = Some(Status::Info("Unflagged".into()));
-                                        } else {
-                                            if !env.flags.contains('F') {
-                                                env.flags = sort_flags(&format!("F{}", env.flags));
-                                            }
-                                            app.status = Some(Status::Info("Flagged".into()));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        app.status =
-                                            Some(Status::Error(format!("Toggle flag failed: {e}")));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                app.status =
-                                    Some(Status::Error(format!("Toggle flag failed: {e}")));
-                            }
-                        }
-                    }
-                }
-            }
-            Action::OpenFolderList => {
-                app.status = Some(Status::Working("Loading folders…".to_string()));
-                terminal.draw(|frame| ui::render(frame, app))?;
+                Action::MoveMessage => {
+                    if let Some(ctx) = active_envelope_context(app, default_account) {
+                        let (id_str, account_key, source_folder) =
+                            (ctx.id.clone(), ctx.account_key.clone(), ctx.folder.clone());
 
-                // Save current state before transitioning
-                app.saved_list_state = Some(SavedListState {
-                    folder_context: app.folder_context.clone(),
-                    envelopes: app.envelopes.clone(),
-                    sections: app.sections.clone(),
-                    selected: app.selected,
-                });
-                app.search = None;
+                        app.status = Some(Status::Working("Loading folders…".to_string()));
+                        terminal.draw(|frame| ui::render(frame, app))?;
 
-                match fetch_folder_list(backends, None).await {
-                    Ok((folders, sections)) => {
-                        app.status = None;
-                        app.view = View::FolderList(FolderListState {
-                            folders,
-                            sections,
+                        match fetch_folder_list(backends, Some(&account_key), Some(&source_folder))
+                            .await
+                        {
+                            Ok((folders, _sections)) => {
+                                if folders.is_empty() {
+                                    app.status = Some(Status::Error(
+                                        "No other folders available".to_string(),
+                                    ));
+                                } else {
+                                    app.status = None;
+                                    // If in MessageRead, go back to list first
+                                    if matches!(app.view, View::MessageRead { .. }) {
+                                        app.view = View::MessageList;
+                                    }
+
+                                    app.view = View::MoveFolderPicker(MoveFolderPickerState {
+                                        folders,
+                                        selected: 0,
+                                        source_envelope_id: id_str,
+                                        source_folder,
+                                        account_key,
+                                    });
+                                }
+                            }
+                            Err(err) => {
+                                app.status = Some(Status::Error(err));
+                            }
+                        }
+                    }
+                }
+                Action::ConfirmMove => {
+                    if let View::MoveFolderPicker(ref state) = app.view {
+                        if let Some(target) = state.folders.get(state.selected) {
+                            let target_name = target.name.clone();
+                            let source_folder = state.source_folder.clone();
+                            let id_str = state.source_envelope_id.clone();
+                            let account_key = state.account_key.clone();
+                            // Look up by ID in case the list changed since the picker opened.
+                            let Some(envelope_index) =
+                                app.envelopes.iter().position(|e| e.id == id_str)
+                            else {
+                                app.view = View::MessageList;
+                                app.status = Some(Status::Error(
+                                    "Envelope no longer in list; move aborted".to_string(),
+                                ));
+                                break;
+                            };
+                            execute_message_op(
+                                app,
+                                terminal,
+                                backends,
+                                &account_key,
+                                &id_str,
+                                envelope_index,
+                                MessageOp::Move {
+                                    source_folder,
+                                    target_folder: target_name,
+                                },
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Action::EditMessage => {
+                    if let Err(e) =
+                        handle_edit_message(app, terminal, backends, default_account).await
+                    {
+                        app.status = Some(Status::Error(format!("Edit failed: {e}")));
+                    }
+                }
+                Action::ComposeMessage => {
+                    if backends.len() > 1 {
+                        let mut accounts: Vec<String> = backends.keys().cloned().collect();
+                        accounts.sort();
+                        let previous_view = std::mem::replace(&mut app.view, View::MessageList);
+                        app.view = View::AccountPicker(AccountPickerState {
+                            accounts,
                             selected: 0,
+                            previous_view: Box::new(previous_view),
                         });
+                    } else if backends.is_empty() {
+                        app.status = Some(Status::Error("No accounts available".to_string()));
+                    } else if let Err(e) = handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::New,
+                        None,
+                    )
+                    .await
+                    {
+                        app.status = Some(Status::Error(format!("Compose failed: {e}")));
                     }
-                    Err(err) => {
-                        app.status = Some(Status::Error(err));
-                    }
                 }
-            }
-            Action::FolderSelectNext => {
-                if app.search.is_some() {
-                    app.search_select_next();
-                } else {
-                    app.folder_select_next();
-                }
-            }
-            Action::FolderSelectPrev => {
-                if app.search.is_some() {
-                    app.search_select_prev();
-                } else {
-                    app.folder_select_prev();
-                }
-            }
-            Action::BackFromFolderPicker => {
-                // Restore saved state
-                if let Some(saved) = app.saved_list_state.take() {
-                    app.envelopes = saved.envelopes;
-                    app.sections = saved.sections;
-                    app.selected = saved.selected;
-                    app.folder_context = saved.folder_context;
-                }
-                app.view = View::MessageList;
-                app.search = None;
-                refresh_envelope_list(app, backends, terminal).await;
-            }
-            Action::SelectFolder => {
-                // Extract folder info from the FolderList state
-                let folder_info = if let View::FolderList(state) = &app.view {
-                    state
-                        .folders
-                        .get(state.selected)
-                        .map(|f| (f.name.clone(), f.account.clone()))
-                } else {
-                    None
-                };
-
-                if let Some((folder_name, account_key)) = folder_info {
-                    app.status = Some(Status::Working(format!("Loading {folder_name}…")));
-                    terminal.draw(|frame| ui::render(frame, app))?;
-
-                    // Resolve the backend key
-                    let key = if !account_key.is_empty() {
-                        account_key.clone()
-                    } else if backends.contains_key(default_account) {
-                        default_account.to_string()
-                    } else {
-                        backends.keys().next().cloned().unwrap_or_default()
-                    };
-
-                    let mut error: Option<String> = None;
-                    let mut envelope_data = Vec::new();
-
-                    if let Some(ab) = backends.get(&key) {
-                        let page_size = ab.account_config.get_envelope_list_page_size();
-                        let opts = ListEnvelopesOptions {
-                            page: 0,
-                            page_size,
-                            query: None,
-                        };
-                        match ab.backend.list_envelopes(&folder_name, opts).await {
-                            Ok(envelopes) => {
-                                envelope_data = envelopes.iter().map(EnvelopeData::from).collect();
-                                for env in &mut envelope_data {
-                                    env.account = key.clone();
-                                }
-                            }
-                            Err(e) => {
-                                error = Some(format!("Error loading envelopes: {e}"));
+                Action::ConfirmAccountPicker => {
+                    if let View::AccountPicker(state) =
+                        std::mem::replace(&mut app.view, View::MessageList)
+                    {
+                        if let Some(account_key) = state.accounts.get(state.selected) {
+                            let key = account_key.clone();
+                            app.view = *state.previous_view;
+                            if let Err(e) = handle_compose(
+                                app,
+                                terminal,
+                                backends,
+                                default_account,
+                                ComposeKind::New,
+                                Some(&key),
+                            )
+                            .await
+                            {
+                                app.status = Some(Status::Error(format!("Compose failed: {e}")));
                             }
                         }
                     }
-
-                    if let Some(err) = error {
-                        app.status = Some(Status::Error(err));
-                    } else {
-                        app.status = None;
-                        app.folder_context = FolderContext::SingleFolder {
-                            folder_name,
-                            account_key: key.clone(),
-                        };
-                        app.sections = vec![AccountSection {
-                            name: key,
-                            start: 0,
-                            count: envelope_data.len(),
-                        }];
-                        app.envelopes = envelope_data;
-                        app.selected = 0;
-                        app.view = View::MessageList;
-                        app.search = None;
+                }
+                Action::CancelAccountPicker => {
+                    if let View::AccountPicker(state) =
+                        std::mem::replace(&mut app.view, View::MessageList)
+                    {
+                        app.view = *state.previous_view;
+                    }
+                }
+                Action::ReplyMessage => {
+                    if let Err(e) = handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::Reply,
+                        None,
+                    )
+                    .await
+                    {
+                        app.status = Some(Status::Error(format!("Reply failed: {e}")));
+                    }
+                }
+                Action::ReplyAllMessage => {
+                    if let Err(e) = handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::ReplyAll,
+                        None,
+                    )
+                    .await
+                    {
+                        app.status = Some(Status::Error(format!("Reply all failed: {e}")));
+                    }
+                }
+                Action::ForwardMessage => {
+                    if let Err(e) = handle_compose(
+                        app,
+                        terminal,
+                        backends,
+                        default_account,
+                        ComposeKind::Forward,
+                        None,
+                    )
+                    .await
+                    {
+                        app.status = Some(Status::Error(format!("Forward failed: {e}")));
                     }
                 }
             }
-            Action::StartSearch => {
-                app.start_search();
-            }
-            Action::SearchChar(c) => {
-                app.search_push_char(c);
-            }
-            Action::SearchBackspace => {
-                app.search_pop_char();
-            }
-            Action::SearchConfirm => {
-                app.confirm_search();
+
+            if clear_search_after {
                 app.cancel_search();
             }
-            Action::SearchCancel => {
-                app.cancel_search();
-            }
-        }
+            break;
+        } // end inner action loop
 
         if app.should_quit {
             break;

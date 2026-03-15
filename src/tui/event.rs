@@ -28,6 +28,16 @@ pub enum Action {
     SearchBackspace,
     SearchConfirm,
     SearchCancel,
+    MoveMessage,
+    ConfirmMove,
+    CancelMove,
+    ComposeMessage,
+    ReplyMessage,
+    ReplyAllMessage,
+    ForwardMessage,
+    EditMessage,
+    ConfirmAccountPicker,
+    CancelAccountPicker,
 }
 
 pub fn handle_event(
@@ -83,6 +93,12 @@ fn action_for_key(
             KeyCode::Char('a') => Action::ArchiveMessage,
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('f') => Action::ToggleFlag,
+            KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('N') => Action::ComposeMessage,
+            KeyCode::Char('R') => Action::ReplyMessage,
+            KeyCode::Char('A') => Action::ReplyAllMessage,
+            KeyCode::Char('E') => Action::EditMessage,
+            KeyCode::Char('F') => Action::ForwardMessage,
             KeyCode::Char('\\') => Action::OpenFolderList,
             KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
@@ -104,6 +120,28 @@ fn action_for_key(
             KeyCode::Char('r') => Action::ToggleRead,
             KeyCode::Char('n') => Action::NextMessage,
             KeyCode::Char('f') => Action::ToggleFlag,
+            KeyCode::Char('m') => Action::MoveMessage,
+            KeyCode::Char('E') => Action::EditMessage,
+            KeyCode::Char('N') => Action::ComposeMessage,
+            KeyCode::Char('R') => Action::ReplyMessage,
+            KeyCode::Char('A') => Action::ReplyAllMessage,
+            KeyCode::Char('F') => Action::ForwardMessage,
+            _ => Action::None,
+        },
+        View::MoveFolderPicker(_) => match key {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CancelMove,
+            KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
+            KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
+            KeyCode::Enter => Action::ConfirmMove,
+            KeyCode::Char('/') => Action::StartSearch,
+            _ => Action::None,
+        },
+        View::AccountPicker(_) => match key {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CancelAccountPicker,
+            KeyCode::Down | KeyCode::Char('j') => Action::FolderSelectNext,
+            KeyCode::Up | KeyCode::Char('k') => Action::FolderSelectPrev,
+            KeyCode::Enter => Action::ConfirmAccountPicker,
+            KeyCode::Char('/') => Action::StartSearch,
             _ => Action::None,
         },
     }
@@ -487,6 +525,286 @@ mod tests {
         assert_eq!(
             action_for_key(&list_view(), &all_inboxes(), KeyCode::Up, true),
             Action::SelectPrev
+        );
+    }
+
+    // --- MoveMessage keybinding ---
+
+    #[test]
+    fn list_m_moves_message() {
+        assert_eq!(
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('m'), false),
+            Action::MoveMessage
+        );
+    }
+
+    #[test]
+    fn message_m_moves_message() {
+        assert_eq!(
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('m'), false),
+            Action::MoveMessage
+        );
+    }
+
+    // --- MoveFolderPicker keybindings ---
+
+    fn move_picker_view() -> View {
+        use crate::tui::app::MoveFolderPickerState;
+        View::MoveFolderPicker(MoveFolderPickerState {
+            folders: Vec::new(),
+            selected: 0,
+            source_envelope_id: String::new(),
+            source_folder: String::new(),
+            account_key: String::new(),
+        })
+    }
+
+    #[test]
+    fn move_picker_esc_cancels() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), &all_inboxes(), KeyCode::Esc, false),
+            Action::CancelMove
+        );
+    }
+
+    #[test]
+    fn move_picker_q_cancels() {
+        assert_eq!(
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('q'),
+                false
+            ),
+            Action::CancelMove
+        );
+    }
+
+    #[test]
+    fn move_picker_j_selects_next() {
+        assert_eq!(
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('j'),
+                false
+            ),
+            Action::FolderSelectNext
+        );
+    }
+
+    #[test]
+    fn move_picker_k_selects_prev() {
+        assert_eq!(
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('k'),
+                false
+            ),
+            Action::FolderSelectPrev
+        );
+    }
+
+    #[test]
+    fn move_picker_enter_confirms_move() {
+        assert_eq!(
+            action_for_key(&move_picker_view(), &all_inboxes(), KeyCode::Enter, false),
+            Action::ConfirmMove
+        );
+    }
+
+    #[test]
+    fn move_picker_slash_starts_search() {
+        assert_eq!(
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('/'),
+                false
+            ),
+            Action::StartSearch
+        );
+    }
+
+    #[test]
+    fn move_picker_unknown_is_none() {
+        assert_eq!(
+            action_for_key(
+                &move_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('z'),
+                false
+            ),
+            Action::None
+        );
+    }
+
+    // --- Compose keybindings ---
+
+    #[test]
+    fn list_n_composes() {
+        assert_eq!(
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('N'), false),
+            Action::ComposeMessage
+        );
+    }
+
+    #[test]
+    fn list_r_replies() {
+        assert_eq!(
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('R'), false),
+            Action::ReplyMessage
+        );
+    }
+
+    #[test]
+    fn list_a_reply_all() {
+        assert_eq!(
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('A'), false),
+            Action::ReplyAllMessage
+        );
+    }
+
+    #[test]
+    fn list_f_forwards() {
+        assert_eq!(
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('F'), false),
+            Action::ForwardMessage
+        );
+    }
+
+    #[test]
+    fn message_n_composes() {
+        assert_eq!(
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('N'), false),
+            Action::ComposeMessage
+        );
+    }
+
+    #[test]
+    fn message_r_replies() {
+        assert_eq!(
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('R'), false),
+            Action::ReplyMessage
+        );
+    }
+
+    #[test]
+    fn message_a_reply_all() {
+        assert_eq!(
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('A'), false),
+            Action::ReplyAllMessage
+        );
+    }
+
+    #[test]
+    fn message_f_forwards() {
+        assert_eq!(
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('F'), false),
+            Action::ForwardMessage
+        );
+    }
+
+    // --- EditMessage keybindings ---
+
+    #[test]
+    fn list_e_edits() {
+        assert_eq!(
+            action_for_key(&list_view(), &all_inboxes(), KeyCode::Char('E'), false),
+            Action::EditMessage
+        );
+    }
+
+    #[test]
+    fn message_e_edits() {
+        assert_eq!(
+            action_for_key(&message_view(), &all_inboxes(), KeyCode::Char('E'), false),
+            Action::EditMessage
+        );
+    }
+
+    // --- AccountPicker keybindings ---
+
+    fn account_picker_view() -> View {
+        use crate::tui::app::AccountPickerState;
+        View::AccountPicker(AccountPickerState {
+            accounts: vec!["work".to_string(), "personal".to_string()],
+            selected: 0,
+            previous_view: Box::new(View::MessageList),
+        })
+    }
+
+    #[test]
+    fn account_picker_esc_cancels() {
+        assert_eq!(
+            action_for_key(&account_picker_view(), &all_inboxes(), KeyCode::Esc, false),
+            Action::CancelAccountPicker
+        );
+    }
+
+    #[test]
+    fn account_picker_q_cancels() {
+        assert_eq!(
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('q'),
+                false
+            ),
+            Action::CancelAccountPicker
+        );
+    }
+
+    #[test]
+    fn account_picker_j_selects_next() {
+        assert_eq!(
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('j'),
+                false
+            ),
+            Action::FolderSelectNext
+        );
+    }
+
+    #[test]
+    fn account_picker_k_selects_prev() {
+        assert_eq!(
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('k'),
+                false
+            ),
+            Action::FolderSelectPrev
+        );
+    }
+
+    #[test]
+    fn account_picker_enter_confirms() {
+        assert_eq!(
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Enter,
+                false
+            ),
+            Action::ConfirmAccountPicker
+        );
+    }
+
+    #[test]
+    fn account_picker_unknown_is_none() {
+        assert_eq!(
+            action_for_key(
+                &account_picker_view(),
+                &all_inboxes(),
+                KeyCode::Char('z'),
+                false
+            ),
+            Action::None
         );
     }
 }
